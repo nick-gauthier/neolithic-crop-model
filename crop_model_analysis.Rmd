@@ -1,8 +1,15 @@
 ---
-title: "R Notebook"
-output:
-  html_notebook: default
-  html_document: default
+title: "Eco-cultural niches and the spread of farming"
+author: "Nick Gauthier"
+date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
+bibliography: bibliography.bibtex
+output: 
+  html_document: 
+    fig_caption: yes
+    highlight: zenburn
+    keep_md: yes
+    theme: flatly
+    toc: yes
 ---
 
 ```{r messages = F}
