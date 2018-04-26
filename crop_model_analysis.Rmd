@@ -1,0 +1,427 @@
+---
+title: "R Notebook"
+output:
+  html_notebook: default
+  html_document: default
+---
+
+```{r messages = F}
+library(raster)
+library(tidyverse)
+library(gdistance)
+library(mgcv)
+#devtools::install_github("dgrtwo/gganimate")
+library(gganimate)
+```
+
+```{r}
+dat <- read_csv('~/Dropbox/crop models/R_analysis/cs_dates_4_grass.csv') %>%
+  filter(Long != 0)
+```
+```{r}
+mod1 <- gam(Cal.BC ~ s(Long, bs = 'cr', k = 7), data = dat, method = 'REML')
+plot(mod1, residuals = T)
+mod1
+summary(mod1)
+gam.check(mod1)
+```
+
+```{r}
+qplot(dat$Long, mod1$residuals, geom = 'point')
+hist(mod1$residuals)
+summary(mod1$residuals)
+
+dat2 <- cbind(dat[,1:5], residuals = mod1$residuals)
+```
+
+```{r}
+library(qgam)
+library(MASS)
+data(mcycle)
+mcycle
+dat
+qmod1 <- qgam(Cal.BC ~ s(Long, k = 20, bs = 'cr'), 
+            data = dat[,c(1,4)], 
+            qu = 0.95)
+dat %>% mutate(residuals = qmod1$residuals) %>% write_csv('~/site_residuals.csv')
+xSeq <- data.frame(cbind("accel" = rep(0, 1e3), "Long" = seq(-11, 50, length.out = 1e3)))
+pred <- predict(qmod1, newdata = xSeq, se=TRUE)
+plot(dat$Long, dat$Cal.BC, xlab = "Longitude", ylab = "Year")
+lines(xSeq$Long, pred$fit, lwd = 1)
+lines(xSeq$Long, pred$fit + 2*pred$se.fit, lwd = 1, col = 2)
+lines(xSeq$Long, pred$fit - 2*pred$se.fit, lwd = 1, col = 2) 
+```
+
+
+```{r}
+library(geosphere)
+
+out <- c()
+for(i in 1:730){
+  out <- cbind(out, distGeo(dat[,1:2], dat[i,1:2]))
+}
+
+
+library(tidygraph)
+library(ggraph)
+
+net <- as_tbl_graph(out) %>%
+  mutate(date = dat$Cal.BC, x = dat$Long, y = dat$Lat, resids = mod1$residuals) %>%
+  activate(edges) %>%
+  mutate(time_diff = .N()$date[from] - .N()$date[to]) %>%
+  mutate(med_date = (.N()$date[from] + .N()$date[to]) / 2)
+
+
+net %>%
+  filter(time_diff > 0 & time_diff <= 65) %>%
+  filter(weight <= 600000) %>%
+ggraph() +
+  geom_edge_fan(alpha = .2) +
+  geom_node_point(aes(color = date)) +
+  scale_color_distiller(palette = 'Spectral', direction = -1) +
+  theme_void() +
+  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50))
+```
+
+
+## Spatiotemporal point pattern analysis
+
+
+```{r}
+best.month <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD_11oct16/best_month_scr_PALEOd__whemmer0RF_269_d0_paleoD__ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+                      raster('~/Dropbox/crop models/paleoD_10nov16/paleoD_11oct16/best_yield_scr_PALEOd__whemmer0RF_269_d0_paleoD__ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'))) %>%
+  as.data.frame(xy = T, na.rm = T) %>%
+  as_tibble %>%
+  rename(Month = best_month_scr_PALEOd__whemmer0RF_269_d0_paleoD__ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean,
+         Yield = best_yield_scr_PALEOd__whemmer0RF_269_d0_paleoD__ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean) %>%
+  mutate(Month = if_else(Month %in% c(12, 1, 2), 'Winter', 
+                         if_else(Month %in% 3:5, 'Spring',
+                                 if_else(Month %in% 6:8, 'Summer',
+                                         if_else(Month %in% 9:11, 'Fall', 'None'))))) %>%
+  mutate(Month = factor(Month, c('Winter', 'Spring', 'Summer', 'Fall')))
+
+load('~/Dropbox/crop models/R_analysis/med_region_gg.rda')
+```
+```{r}
+ggplot(dat, aes(Long, Lat)) +
+  geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
+  geom_point(aes(frame = Cal.BC * -1, cumulative = T)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  theme_void()
+```
+
+```{r}
+yields <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_1_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_2_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_3_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_4_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_5_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_6_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_7_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_8_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_9_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_10_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_11_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster( '~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_12_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc')))
+
+yields <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_1_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_2_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_3_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_4_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_5_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_6_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_7_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_8_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_9_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_10_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_11_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
+        raster( '~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_12_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc')))
+
+
+names(yields) <- month.name
+
+winter_yield <- max(yields[[c(1,2,12)]]) %>% as.data.frame(xy = T, na.rm = T) %>% filter(layer > 0)
+```
+
+```{r}
+dat2 %>%
+  mutate(arrival = if_else(residuals <= 0, 'Late', 'Early')) %>%
+ggplot(aes(Long, Lat)) +
+  geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
+  geom_point(aes(color = arrival)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
+  theme_void()
+```
+
+```{r}
+dat2 %>%
+  mutate(arrival = if_else(residuals > -100, 'Early', 'Late')) %>%
+ggplot(aes(Long, Lat)) +
+  geom_raster(data = winter_yield, aes(x, y, fill = layer)) +
+  geom_point(aes(color = residuals)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_color_distiller(palette = 'RdYlBu') +
+  scale_fill_viridis() +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
+  theme_void()
+```
+
+
+```{r}
+vid <- ggplot(dat, aes(Long, Lat)) +
+  geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
+  geom_point(aes(frame = Cal.BC * -1, cumulative = T)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
+  theme_void()
+
+gganimate(vid, filename = 'neo_spread.mp4', saver = 'mp4')
+```
+
+
+import water mask : source (http://worldgrids.org/doku.php/wiki:wmkmod)
+```{r}
+land <- raster('~/Downloads/WMKMOD3a.tif') %>% 
+  crop(bbox) %>%
+  reclassify(c(-1, 1, 1, 2, 100, 0))
+plot(land)
+hist(land)
+land <- is.na(water_bodies)
+
+conductance <- transition(land, 'mean', 8, symm = T) %>%
+  geoCorrection(type = 'c')
+```
+
+## Stuff with gdistance
+```{r}
+bbox <- extent(-9.9, 45, 30, 50)
+library(gdistance)
+srtm <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
+  crop(bbox) %>% 
+  mask(land, maskvalue = 0)
+
+altDiff <- function(x){x[2] - x[1]}
+hd <- transition(srtm, altDiff, 8, symm=FALSE)
+cell.targets <- Which(!is.na(srtm), cells = T)
+adj <- adjacent(srtm, cells=cell.targets, target = cell.targets, pairs=TRUE, directions=8)
+
+slope.c <- geoCorrection(hd, type = 'c')
+rm(hd);gc()
+speed.c <- slope.c
+speed.c[adj] <- 6 * exp(-3.5 * abs(slope.c[adj] + 0.05))
+rm(slope.c, adj);gc()
+Conductance.c <- geoCorrection(speed.c, type = 'c')
+rm(speed.c);gc()
+```
+
+
+```{r}
+dat %>%
+  filter(Site_Name == 'Jericho')
+acc <- accCost(Conductance.c, c(35.47,	31.86)) 
+acc2 <- accCost(conductance, c(35.47,	31.86)) 
+plot(acc)
+plot(acc2)
+plot(acc,acc2)
+```
+```{r}
+dat[,1:2] %>% as.matrix
+
+raster::extract(acc, as.matrix(dat[,1:2]), df = T)
+
+plot(raster::extract(acc, as.matrix(dat[,1:2]), df = T)$layer, dat$Cal.BC)
+plot(raster::extract(acc2, as.matrix(dat[,1:2]), df = T)$layer, dat$Cal.BC)
+```
+
+
+van etten reporduction
+```{r}
+decay <- function(x,p)
+{
+	tm <- transitionMatrix(x)
+	tm@x[tm@x>0.1] <- (2^-(tm@x[tm@x>0.1]/p))
+	tm@x <- tm@x/max(tm@x)
+	transitionMatrix(x) <- tm
+	return(x)
+}
+
+Rho <- function(residl, Tau) {residl * (Tau - (residl < 0))  }	
+
+constr <- function(pv) 
+{
+	if(seaMask[cellFromXY(seaMask,SpatialPoints(t(as.matrix(c(pv[1],pv[2])))))] == 0) {con <- -1}
+	else{con <- 1}
+	return(con)
+}
+
+createTransition <- function(pv)
+{
+	pv[4] <- (1.1 ^ pv[4])/10
+	seaTi <- decay(seaT,pv[3])
+	seaTr <- normalize(seaTi , symm = TRUE) #normalize(seaTi, method="symm")
+	Trt <- seaTr * pv[4] + landT 
+	Trt <- Trt * correctionArch
+	return(Trt)
+}
+
+RR <- function(pv)
+{
+	R <- c(0,0)
+	cat("xy:", pv[1:2], ", parameters:", pv[3:4])
+	origin <- SpatialPoints(t(as.matrix(c(pv[1],pv[2]))))
+	if(seaMask[cellFromXY(seaMask,origin)] == 1)
+	{
+		Tr <- createTransition(pv)
+		cdm <- accCost(Tr,origin)
+		cdm1 <- values(cdm)[cellArchaeo]
+		cdm2 <- values(cdm)[cellSSR]
+		if(all(!(cdm1 %in% c(-Inf, Inf)),!is.na(cdm1)))
+		{
+			tdata <- cbind(dates,cdm1)
+			outcome1 <- try(rq(Calibrated_median ~ cdm1, tau=.8, data=tdata, weights=wghtsArch))
+			outcome2 <- try(rq(Hz ~ cdm2, tau=.2))
+			if(class(outcome1) == "rq" & class(outcome2) == "rq")
+			{
+				slope1 <- coefficients(outcome1)[2]
+				if(slope1>0){}
+				else {R[1] <- 1- outcome1$rho / rho0Arch}
+				slope2 <- coefficients(outcome2)[2]
+				if(slope2>0){}
+				else {R[2] <- 1 - outcome2$rho / rho0Hz}
+				cat(", R:", R, "\n")
+			} else{cat("\nrq failed\n")}
+		} else{cat("\nNA and/or Inf\n")}
+	} else{cat("\nsea\n")}
+	return(1-R) 
+}
+
+wghtsArch <- rep(1, times=length(coord[,1]))
+for (i in 1:length(coord[,1]))
+{
+	dists <- pointDistance(as.vector(coord[i,]),coord,type='GreatCircle')
+	wghtsArch[i] <- 1/(sum(dists<100000))
+}
+
+
+#Geographic data: land/sea
+seaMask <- raster(landlake, values=TRUE)
+projection(seaMask) <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+landT <- TransitionFromRaster(seaMask,transitionFunction="min",directions=8)
+landT <- normalize(landT, symm = TRUE)
+index1 <- adjacency(seaMask, which(values(seaMask) == 1), which(values(seaMask) == 1), directions=8)
+
+landsea <- seaMask
+landsea <- setValues(landsea, rep(1,times=ncell(landsea)))
+allT <- TransitionFromRaster(landsea, transitionFunction="max", directions=8)
+correctionArch <- geoCorrection(allT, type="c", multpl=TRUE)
+correctionGen <- geoCorrection(allT, type="r", multpl=TRUE)
+
+seaMaskNA <- seaMask
+seaMaskNA[which(values(seaMask) == 0)] <- NA
+seaCost <- distance(seaMaskNA)
+seaT <- transition(seaCost,transitionFunction="mean",directions=8)
+index2 <- adjacency(seaCost, which(values(seaCost) > 0), 1:ncell(seaCost), directions=8)
+
+#Get cell values
+cellArchaeo <- cellFromXY(seaMask, datesSP)
+cellSSR <- cellFromXY(seaMask, ssrSP)
+
+
+#############################    ANALYSIS  ########################################
+
+#Calculate null models quantile regression
+rho0Arch <- rq(Calibrated_median ~ 1, tau=.8, data=dates, weights=wghtsArch)$rho
+rho0Hz <- rq(Hz ~ 1, tau=.2)$rho
+
+#SETTINGS
+xmin <- -110
+xmax <- -80
+ymin <- 8
+ymax <- 25
+
+#Get solutions
+sol1 <- nsga2(RR, 4, 2,
+	generations=60, 
+	popsize=200,
+	lower.bounds=c(xmin,ymin, 1000, -100), 
+	upper.bounds=c(xmax,ymax, 200000, 100), 
+	constraints=constr
+	)
+
+#Format and store solutions
+sol <- cbind(sol1$par,sol1$value,sol1$pareto.optimal)
+sol <- sol[sol[,7] == 1,]
+sol <- unique(sol)
+sol <- sol[order(sol[,5]),]
+sol[,5] <- 1 - sol[,5]
+sol[,6] <- 1 - sol[,6]
+write.csv(sol,"ParetoOptimalSolutions2.csv")
+
+#Read solution into memory and select representative solutions
+sol <- read.csv("ParetoOptimalSolutions.csv", row.names=1)
+selectSol <- as.numeric(rownames(pam(sol[,1:2], 8, metric="euclidean")$medoids))
+selectSol <- c(selectSol,145)
+
+#Table 1
+Table1 <- sol[selectSol,1:6]
+Table1[,4] <- (1.1 ^ Table1[,4])/10
+colnames(Table1) <- c("Longitude","Latitude","p2","p1","R1 Arch","R1 Gene")
+rownames(Table1) <- LETTERS[1:9]
+
+#Look at representative solutions for different values of theta
+theta <- c(0.01, 0.1, 0.5, 1, 1.5, 2)
+
+for(i in c(6,9))#length(selectSol))
+{
+	x <- selectSol[i]
+	pv <- unlist(sol[x,1:6])
+	origin <- SpatialPoints(t(as.matrix(pv[1:2])))
+	Tr <- createTransition(pv)
+	for(th in 2:6) 
+	{
+		PI <- pathInc(Tr, origin, ssrSP, type=c("divergent","joint"), theta = theta[th])
+		div <- PI$divergent
+		joint <- PI$joint
+		dataGenGeo <- as.data.frame(cbind(joint, div, geoDist))
+		write.csv(dataGenGeo,paste("dataGenGeoT", LETTERS[i], "theta=", theta[th], sep=""))
+	}
+}
+
+resultR2 <- matrix(nrow=length(theta),ncol=length(selectSol))
+resultSign1 <- matrix(nrow=length(theta),ncol=length(selectSol))
+resultSign2 <- matrix(nrow=length(theta),ncol=length(selectSol))
+resultCoeff1 <- matrix(nrow=length(theta),ncol=length(selectSol))
+resultCoeff2 <- matrix(nrow=length(theta),ncol=length(selectSol))
+
+for(i in 1:length(selectSol))
+{
+	for(th in 1:length(theta))
+	{
+		dataGG <- read.csv(paste("dataGenGeoT", LETTERS[i], "theta=", theta[th], sep=""))
+		dataGG <- as.data.frame(cbind(ssrDist,dataGG))
+		result <- permReg(ssrDist ~ joint + div, dat=dataGG, perms = 999)
+		resultR2[th,i] <- result$r.square
+		resultSign1[th,i] <- result$significance.terms[1]
+		resultSign2[th,i] <- result$significance.terms[2]
+		resultCoeff1[th,i] <- result$coeff[2]
+		resultCoeff2[th,i] <- result$coeff[3]		
+	}
+}
+
+#Table 2
+resultR2 <- round(resultR2, digits=3)
+rownames(resultR2) <- theta
+colnames(resultR2) <- LETTERS[1:9]
+
+#############################    END ANALYSIS  #
+```
+
