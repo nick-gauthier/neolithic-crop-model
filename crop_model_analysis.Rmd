@@ -12,66 +12,237 @@ output:
     toc: yes
 ---
 
+## Setup
+Load necessary packages.
 ```{r messages = F}
-library(raster)
-library(tidyverse)
-library(gdistance)
-library(mgcv)
-#devtools::install_github("dgrtwo/gganimate")
-library(gganimate)
+library(raster) # for processing of raster maps
+library(tidyverse) # for data cleaning and plotting
+library(mgcv) # for fitting generalized additive model 
+library(gdistance) # for least cost path calculations
+library(viridis) # for pretty colors
+library(qgam) # for quantile regression
+library(gganimate) # for animated plots
+# if gganimate is not installed, run the next line:
+# devtools::install_github('dgrtwo/gganimate')
+#devtools::install_github("gavinsimpson/schoenberg")
+library(schoenberg)
 ```
 
-```{r}
-dat <- read_csv('~/Dropbox/crop models/R_analysis/cs_dates_4_grass.csv') %>%
-  filter(Long != 0)
-```
-```{r}
-mod1 <- gam(Cal.BC ~ s(Long, bs = 'cr', k = 7), data = dat, method = 'REML')
-plot(mod1, residuals = T)
-mod1
-summary(mod1)
-gam.check(mod1)
-```
-
-```{r}
-qplot(dat$Long, mod1$residuals, geom = 'point')
-hist(mod1$residuals)
-summary(mod1$residuals)
-
-dat2 <- cbind(dat[,1:5], residuals = mod1$residuals)
-```
-
-```{r}
-library(qgam)
-library(MASS)
-data(mcycle)
-mcycle
-dat
-qmod1 <- qgam(Cal.BC ~ s(Long, k = 20, bs = 'cr'), 
-            data = dat[,c(1,4)], 
-            qu = 0.95)
-dat %>% mutate(residuals = qmod1$residuals) %>% write_csv('~/site_residuals.csv')
-xSeq <- data.frame(cbind("accel" = rep(0, 1e3), "Long" = seq(-11, 50, length.out = 1e3)))
-pred <- predict(qmod1, newdata = xSeq, se=TRUE)
-plot(dat$Long, dat$Cal.BC, xlab = "Longitude", ylab = "Year")
-lines(xSeq$Long, pred$fit, lwd = 1)
-lines(xSeq$Long, pred$fit + 2*pred$se.fit, lwd = 1, col = 2)
-lines(xSeq$Long, pred$fit - 2*pred$se.fit, lwd = 1, col = 2) 
+Import the database of 14C dates from neolithic sites.
+```{r message = F}
+dates <- read_csv('data/cs_dates_4_grass.csv') %>%
+  filter(Long != 0) %>% # get rid of erroneous entry
+  select(Site_Name, Long, Lat, Cal.BC, Cal.BC.SD) # select just the variables we'll need
 ```
 
 
-```{r}
-library(geosphere)
+```{r echo = }
+load('data//med_region_gg.rda')
 
-out <- c()
-for(i in 1:730){
-  out <- cbind(out, distGeo(dat[,1:2], dat[i,1:2]))
+ggplot(dates, aes(Long, Lat)) +
+  geom_point(aes(color = Cal.BC)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_color_distiller(palette = 'RdYlBu') +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupation') +
+  theme_void()
+```
+
+## Least cost distance modeling
+First let's use the **gdistance** package to calculate how far all the sites in our database are from Jericho (which we use as the "first" site).
+
+Define our study area as the supra-mediterranean region.
+```{r}
+bbox <- extent(-9.9, 45, 29.8, 50)
+```
+
+Find the location of Jericho to use as a starting point. 
+```{r}
+jericho <- dates %>%
+  filter(Site_Name == 'Jericho') %>%
+  select(Long:Lat) %>%
+  as.matrix
+```
+
+Import map distinguishing land and water areas ([source](http://worldgrids.org/doku.php/wiki:dicgsh1)).
+```{r}
+distance_coast <- raster('data/DICGSH1a.tif') %>% # import the map
+  crop(bbox) # crop to the study area
+
+euc <-  distance_coast %>%
+  reclassify(c(-Inf, Inf, 1)) # pure water to 0, all else to 1
+
+land_mask <- distance_coast %>%
+  reclassify(c(0, Inf, NA, -Inf, 0, 1)) # pure water to 0, all else to 1
+
+land_sea <- distance_coast %>%
+  reclassify(c(40, Inf, NA, -Inf, 40, 1)) # pure water to 0, all else to 1
+```
+
+```{r echo = F}
+land_sea %>%
+  as.data.frame(xy = T, na.rm = T) %>%
+  ggplot(aes(x, y, fill = layer)) +
+    geom_raster() +
+    geom_raster(data = as.data.frame(land_mask, xy = T, na.rm = T), fill = 'red') +
+    ggtitle('Land-sea mask', 'Source: Worldgrids.org') +
+    coord_quickmap() +
+    theme_void()
+```
+
+```{r}
+con_euc_c <- transition(euc, mean, 16, symm = T) %>% # knight's move
+  geoCorrection(type = 'c') # correct inter cell distances for latlon distortion
+
+con_euc_r <- transition(euc, mean, 16, symm = T) %>% # now for random walks
+  geoCorrection(type = 'r')
+```
+
+Generate a simple conductance matrix, where all land-land connections are set to 1 and all land-sea or sea-sea connections are set to 0.
+```{r}
+con_land_c <- transition(land_mask, mean, 16, symm = T) %>%
+  geoCorrection(type = 'c')
+
+con_land_r <- transition(land_mask, mean, 16, symm = T) %>% 
+  geoCorrection(type = 'r') 
+```
+
+Repeat, allowing connections across less than 40km of sea.
+```{r}
+con_landsea_c <- transition(land_sea, mean, 16, symm = T) %>% 
+  geoCorrection(type = 'c')
+
+con_landsea_r <- transition(land_sea, mean, 16, symm = T) %>% 
+  geoCorrection(type = 'r')
+```
+
+```{r}
+accumulation <- list(con_euc_c, con_land_c, con_landsea_c) %>%
+  map(accCost, fromCoords = jericho) %>%
+  brick
+```
+
+
+```{r echo = F}
+accumulation %>%
+  mask(land_mask) %>%
+  as.data.frame(xy = T, na.rm =T) %>%
+  rename(euc = layer.1, land = layer.2, landsea = layer.3) %>%
+  gather(type, cost, 3:5) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = cost)) +
+  facet_wrap(~type, nrow = 3) +
+  scale_fill_viridis(direction = -1) +
+  coord_quickmap() +
+  theme_void()
+```
+
+Add the results to the sites data. (Why does raster:extract result in some na's and infs? something to do with the land sea boundary?)
+```{r}
+costs <- dates %>%
+  select(Long:Lat) %>%
+  as.matrix %>%
+  raster::extract(accumulation, ., df = T) %>%
+  rename(euc = layer.1, land = layer.2, landsea = layer.3) %>%
+  cbind(dates, .) %>%
+  select(-ID) %>%
+  gather(type, cost, euc:landsea) %>%
+  nest(-type) %>%
+  mutate(data = map(data, ~filter(., is.finite(cost))))
+```
+
+
+```{r}
+library(broom)
+library(modelr)
+quantile_gam <- function(df){
+  qgam(list(
+    Cal.BC ~ s(cost, bs = 'cr'), 
+           ~ s(cost, bs = 'cr')), 
+    data = df,
+    qu = 0.8)
+}
+cqcheck(quantile_mod, v = 'cost')
+broom::glance(as(quantile_mod, 'gamObject', strict = F))
+class(mod)
+fits <- costs %>%
+  mutate(mod = map(data, quantile_gam),
+         aic = map_dbl(mod, 'aic'),
+         preds = map(mod, make_preds))
+   
+make_preds <- function(x){
+  predict(x, type = 'response', se = T) %>%
+  map(~.[,1]) %>%
+  bind_cols %>%
+  mutate(upper = fit + 2 * se.fit,
+         lower = fit - 2 * se.fit)
+}
+
+fits$preds1
+```
+
+
+```{r}
+plot_results <- function(x){
+  print(ggplot(x, aes(cost, Cal.BC)) +
+  geom_pointrange(aes(ymin = Cal.BC - Cal.BC.SD, 
+                      ymax = Cal.BC + Cal.BC.SD,  
+                      alpha = (1 / Cal.BC.SD) ^ 2), fatten = 2) +
+  geom_line(aes(y = fit), color = 'red') +
+  geom_line(aes(y = lower), linetype = 2, color = 'red') +
+  geom_line(aes(y = upper), linetype = 2, color = 'red') +
+  theme_bw())
 }
 
 
+test<- map2(fits$data, fits$preds, bind_cols) %>%
+walk(plot_results)
+
+
+ggplot(preds, aes(cost, Cal.BC)) +
+  geom_pointrange(aes(ymin = Cal.BC - Cal.BC.SD, 
+                      ymax = Cal.BC + Cal.BC.SD,  
+                      alpha = (1 / Cal.BC.SD) ^ 2), fatten = 2) +
+  geom_line(aes(y = fit), color = 'red') +
+  geom_line(aes(y = lower), linetype = 2, color = 'red') +
+  geom_line(aes(y = upper), linetype = 2, color = 'red') +
+  theme_bw()
+```
+
+```{r eval=FALSE, include=FALSE}
+mod <- gam(Cal.BC ~ s(cost, bs = 'cr'), 
+            data = costs$data[[3]],
+            weights = (1/costs$data[[3]]$Cal.BC.SD)^2)
+mod2<- gam(Cal.BC ~ s(cost, bs = 'cr'), 
+            data = costs)
+mod3 <- gam(Cal.BC ~ s(cost, bs = 'cr'), 
+            data = costs,
+            weights = (1/costs$Cal.BC.SD)^2 / mean((1/costs$Cal.BC.SD)^2))
+plot(mod);plot(mod2); plot(mod3)
+```
+
+```{r}
+mask(land_sea, land_sea, maskvalue = 0) %>%
+  buffer(40) 
+preds %>%
+  mutate(resid = Cal.BC - fit) %>%
+ggplot(aes(Long, Lat)) +
+  geom_point(aes(color = resid), size = 3) +
+  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_color_distiller(palette = 'RdYlBu', limits = c(-2500, 2500)) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupation') +
+  theme_void()
+```
+Now add in seas with a distance decay function.
+
+
+
+```{r}
 library(tidygraph)
 library(ggraph)
 
+commuteDistance(con_landsea_r, pts)
 net <- as_tbl_graph(out) %>%
   mutate(date = dat$Cal.BC, x = dat$Long, y = dat$Lat, resids = mod1$residuals) %>%
   activate(edges) %>%
@@ -108,10 +279,9 @@ best.month <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD_11oct1
                                          if_else(Month %in% 9:11, 'Fall', 'None'))))) %>%
   mutate(Month = factor(Month, c('Winter', 'Spring', 'Summer', 'Fall')))
 
-load('~/Dropbox/crop models/R_analysis/med_region_gg.rda')
 ```
 ```{r}
-ggplot(dat, aes(Long, Lat)) +
+ggplot(dates, aes(Long, Lat)) +
   geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
   geom_point(aes(frame = Cal.BC * -1, cumulative = T)) +
     geom_path(data = med_region_gg, aes(long,lat, group = group)) +
@@ -121,37 +291,30 @@ ggplot(dat, aes(Long, Lat)) +
 ```
 
 ```{r}
-yields <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_1_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_2_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_3_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_4_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_5_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_6_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_7_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_8_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_9_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_10_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_11_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster( '~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_12_ccsm4_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc')))
-
-yields <- brick(c(raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_1_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_2_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_3_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_4_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_5_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_6_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_7_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_8_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_9_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_10_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster('~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_11_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc'),
-        raster( '~/Dropbox/crop models/paleoD_10nov16/paleoD3p1_monthlyyieldonly/scr_PALEOd3p1__whemmer0RF_269_d0_paleoD_12_ensemble_mh6k_p0_neolithiccrop__rainfed_yield_mean.asc')))
-
-
+yields <- list.files('data/paleoD_10nov16/paleoD3p1_monthlyyieldonly/whemmer/', 
+                      pattern = '*ensemble*',
+                      full.names = T) %>%
+  map(raster) %>%
+  brick %>%
+  .[[c(4:12, 1:3)]] %>%
+  reclassify(c(-Inf, 0, 0, NA, NA, 0)) %>%
+  mask(., crop(land_mask, extent(.)))
 names(yields) <- month.name
-
-winter_yield <- max(yields[[c(1,2,12)]]) %>% as.data.frame(xy = T, na.rm = T) %>% filter(layer > 0)
 ```
+
+```{r echo = F}
+yields %>%
+  as.data.frame(xy = T, na.rm = T) %>%
+  gather(month, yield, 3:14) %>%
+  mutate(month = factor(month, levels = month.name)) %>%
+  ggplot(aes(x, y, fill = yield)) +
+  geom_raster() +
+  scale_fill_viridis() +
+  facet_wrap(~month) +
+  coord_quickmap() +
+  theme_void()
+```
+
 
 ```{r}
 dat2 %>%
@@ -193,62 +356,6 @@ vid <- ggplot(dat, aes(Long, Lat)) +
 
 gganimate(vid, filename = 'neo_spread.mp4', saver = 'mp4')
 ```
-
-
-import water mask : source (http://worldgrids.org/doku.php/wiki:wmkmod)
-```{r}
-land <- raster('~/Downloads/WMKMOD3a.tif') %>% 
-  crop(bbox) %>%
-  reclassify(c(-1, 1, 1, 2, 100, 0))
-plot(land)
-hist(land)
-land <- is.na(water_bodies)
-
-conductance <- transition(land, 'mean', 8, symm = T) %>%
-  geoCorrection(type = 'c')
-```
-
-## Stuff with gdistance
-```{r}
-bbox <- extent(-9.9, 45, 30, 50)
-library(gdistance)
-srtm <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
-  crop(bbox) %>% 
-  mask(land, maskvalue = 0)
-
-altDiff <- function(x){x[2] - x[1]}
-hd <- transition(srtm, altDiff, 8, symm=FALSE)
-cell.targets <- Which(!is.na(srtm), cells = T)
-adj <- adjacent(srtm, cells=cell.targets, target = cell.targets, pairs=TRUE, directions=8)
-
-slope.c <- geoCorrection(hd, type = 'c')
-rm(hd);gc()
-speed.c <- slope.c
-speed.c[adj] <- 6 * exp(-3.5 * abs(slope.c[adj] + 0.05))
-rm(slope.c, adj);gc()
-Conductance.c <- geoCorrection(speed.c, type = 'c')
-rm(speed.c);gc()
-```
-
-
-```{r}
-dat %>%
-  filter(Site_Name == 'Jericho')
-acc <- accCost(Conductance.c, c(35.47,	31.86)) 
-acc2 <- accCost(conductance, c(35.47,	31.86)) 
-plot(acc)
-plot(acc2)
-plot(acc,acc2)
-```
-```{r}
-dat[,1:2] %>% as.matrix
-
-raster::extract(acc, as.matrix(dat[,1:2]), df = T)
-
-plot(raster::extract(acc, as.matrix(dat[,1:2]), df = T)$layer, dat$Cal.BC)
-plot(raster::extract(acc2, as.matrix(dat[,1:2]), df = T)$layer, dat$Cal.BC)
-```
-
 
 van etten reporduction
 ```{r}
