@@ -100,19 +100,19 @@ con_euc_r <- transition(euc, mean, 16, symm = T) %>% # now for random walks
 
 Generate a simple conductance matrix, where all land-land connections are set to 1 and all land-sea or sea-sea connections are set to 0.
 ```{r}
-con_land_c <- transition(land_mask, mean, 16, symm = T) %>%
+con_land_c <- transition(land_mask, min, 16, symm = T) %>%
   geoCorrection(type = 'c')
 
-con_land_r <- transition(land_mask, mean, 16, symm = T) %>% 
+con_land_r <- transition(land_mask, min, 16, symm = T) %>% 
   geoCorrection(type = 'r') 
 ```
 
 Repeat, allowing connections across less than 40km of sea.
 ```{r}
-con_landsea_c <- transition(land_sea, mean, 16, symm = T) %>% 
+con_landsea_c <- transition(land_sea, min, 16, symm = T) %>% 
   geoCorrection(type = 'c')
 
-con_landsea_r <- transition(land_sea, mean, 16, symm = T) %>% 
+con_landsea_r <- transition(land_sea, min, 16, symm = T) %>% 
   geoCorrection(type = 'r')
 ```
 
@@ -143,12 +143,13 @@ costs <- dates %>%
   select(Long:Lat) %>%
   as.matrix %>%
   raster::extract(accumulation, ., df = T) %>%
-  rename(euc = layer.1, land = layer.2, landsea = layer.3) %>%
+  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_land = layer.4, month_sea = layer.5) %>%
   cbind(dates, .) %>%
   select(-ID) %>%
-  gather(type, cost, euc:landsea) %>%
+  gather(type, cost, euc:month_sea) %>%
   nest(-type) %>%
-  mutate(data = map(data, ~filter(., is.finite(cost))))
+  mutate(data = map(data, ~filter(., is.finite(cost)))) %>%
+  mutate(data = map(data, ~filter(., cost < 3.4e10))) # shouldnt have to do this!
 ```
 
 
@@ -158,7 +159,7 @@ quantile_gam <- function(df){
     Cal.BC ~ s(cost, bs = 'cr'), 
            ~ s(cost, bs = 'cr')), 
     data = df,
-    qu = 0.8)
+    qu = 0.9)
 }
 
 make_preds <- function(x){
@@ -188,6 +189,7 @@ plot_results <- function(x){
   geom_line(aes(y = fit), color = 'red') +
   geom_line(aes(y = lower), linetype = 2, color = 'red') +
   geom_line(aes(y = upper), linetype = 2, color = 'red') +
+  xlim(0, 5.5e6) +
   theme_bw())
 }
 
@@ -257,8 +259,9 @@ yields_rast <- list.files('data/paleoD_10nov16/paleoD3p1_monthlyyieldonly/whemme
   brick %>%
   .[[c(1, 5:12, 2:4)]] %>%
   reclassify(c(-Inf, 0, 0, NA, NA, 0)) %>%
-  mask(., crop(land_mask, extent(.)))
-names(yields_rast) <- month.name
+  mask(., crop(land_mask, extent(.))) %>%
+  `names<-`(month.name) %>%
+  `projection<-`('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
 ```
 
 ```{r}
@@ -348,7 +351,88 @@ decay <- function(x, p){
 	return(x)
 }
 
+plot(distance_coast)
 
+#Geographic data: land/sea
+landT <- transition(land_mask, min, directions = 8)
+landT <- normalize(landT, method = 'symm')
+index1 <- adjacency(seaMask, which(values(seaMask) == 1), which(values(seaMask) == 1), directions=8)
+
+landsea <- land_mask
+landsea <- setValues(landsea, rep(1,times=ncell(landsea)))
+allT <- transition(landsea, max, directions = 8)
+correctionArch <- geoCorrection(allT, type="c", multpl=TRUE)
+correctionGen <- geoCorrection(allT, type="r", multpl=TRUE)
+
+seaCost <- mask(distance_coast, land_mask, inverse = T)
+plot(seaCost);plot(raster(seaT))
+seaT <- transition(seaCost, mean, directions = 8)
+plot(raster(decay(seaT, 20) + landT))
+
+index2 <- adjacency(seaCost, which(values(seaCost) > 0), 1:ncell(seaCost), directions=8)
+```
+
+```{r}
+expand.grid(difference = seq(0,6,.1), weight = seq(.1,1,.1)) %>%
+  mutate(test = exp(- weight * difference^2)) %>%
+  ggplot(aes(difference, test, group = weight, color = weight)) +
+  geom_line()
+plot(1 / (100 + 0:6))
+
+
+1/0
+```
+
+```{r}
+month_fun <- function(x){
+  dist <- 6 - abs(abs(x[1] - x[2]) - 6)
+  return(exp(- 1 * dist^2))
+}
+month_fun(c(1,NA))
+sea_decay <- distance_coast %>%
+  mask(land_mask, inverse = T) %>%
+  crop(extent(yields_rast)) %>%
+  transition(mean, directions = 16) %>%
+  decay(60)
+
+plot(raster(sea_decay))
+plot(which.max(yields_rast))
+month_sea <- (transition(which.max(yields_rast), month_fun, direction = 16) + sea_decay) %>%
+  geoCorrection(type = 'c')
+month_only <- (transition(which.max(yields_rast), month_fun, direction = 16)) %>%
+  geoCorrection(type = 'c')
+plot(raster(month_only));plot(raster(month_sea))
+```
+
+```{r}
+accumulation <- list(con_euc_c, con_land_c, con_landsea_c, month_only, month_sea) %>%
+  map(accCost, fromCoords = jericho) %>%
+  map(crop, y = extent(yields_rast)) %>%
+  brick
+```
+
+
+```{r echo = F}
+plot(accumulation)
+accumulation %>%
+  mask(crop(land_mask, extent(yields_rast))) %>%
+  as.data.frame(xy = T, na.rm =T) %>%
+  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_only = layer.4, month_sea = layer.5) %>%
+  gather(type, cost, 3:7) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = cost)) +
+  facet_wrap(~type, nrow = 3) +
+  scale_fill_viridis(direction = -1) +
+  coord_quickmap() +
+  theme_void()
+```
+```
+
+
+```{r}
+plot(landsea)
+```
+```{r}
 constr <- function(pv) 
 {
 	if(seaMask[cellFromXY(seaMask,SpatialPoints(t(as.matrix(c(pv[1],pv[2])))))] == 0) {con <- -1}
@@ -372,32 +456,9 @@ for (i in 1:length(coord[,1]))
 	dists <- pointDistance(as.vector(coord[i,]),coord,type='GreatCircle')
 	wghtsArch[i] <- 1/(sum(dists<100000))
 }
-
-
-#Geographic data: land/sea
-seaMask <- raster(landlake, values=TRUE)
-projection(seaMask) <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
-landT <- TransitionFromRaster(seaMask,transitionFunction="min",directions=8)
-landT <- normalize(landT, symm = TRUE)
-index1 <- adjacency(seaMask, which(values(seaMask) == 1), which(values(seaMask) == 1), directions=8)
-
-landsea <- seaMask
-landsea <- setValues(landsea, rep(1,times=ncell(landsea)))
-allT <- TransitionFromRaster(landsea, transitionFunction="max", directions=8)
-correctionArch <- geoCorrection(allT, type="c", multpl=TRUE)
-correctionGen <- geoCorrection(allT, type="r", multpl=TRUE)
-
-
-seaT <- transition(seaCost,mean,directions=8)
-plot(seaCost)
-plot(raster(seaT));plot(raster(decay(seaT, 20000)))
-
-index2 <- adjacency(seaCost, which(values(seaCost) > 0), 1:ncell(seaCost), directions=8)
-
-#Get cell values
-cellArchaeo <- cellFromXY(seaMask, datesSP)
-cellSSR <- cellFromXY(seaMask, ssrSP)
 ```
+
+
 ```{r}
 #############################    ANALYSIS  ########################################
 
