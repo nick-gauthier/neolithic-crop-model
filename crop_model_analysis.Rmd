@@ -340,8 +340,7 @@ gganimate(vid, filename = 'neo_spread.mp4', saver = 'mp4')
 
 van etten reporduction
 ```{r}
-decay <- function(x,p)
-{
+decay <- function(x, p){
 	tm <- transitionMatrix(x)
 	tm@x[tm@x>0.1] <- (2^-(tm@x[tm@x>0.1]/p))
 	tm@x <- tm@x/max(tm@x)
@@ -349,7 +348,6 @@ decay <- function(x,p)
 	return(x)
 }
 
-Rho <- function(residl, Tau) {residl * (Tau - (residl < 0))  }	
 
 constr <- function(pv) 
 {
@@ -366,37 +364,6 @@ createTransition <- function(pv)
 	Trt <- seaTr * pv[4] + landT 
 	Trt <- Trt * correctionArch
 	return(Trt)
-}
-
-RR <- function(pv)
-{
-	R <- c(0,0)
-	cat("xy:", pv[1:2], ", parameters:", pv[3:4])
-	origin <- SpatialPoints(t(as.matrix(c(pv[1],pv[2]))))
-	if(seaMask[cellFromXY(seaMask,origin)] == 1)
-	{
-		Tr <- createTransition(pv)
-		cdm <- accCost(Tr,origin)
-		cdm1 <- values(cdm)[cellArchaeo]
-		cdm2 <- values(cdm)[cellSSR]
-		if(all(!(cdm1 %in% c(-Inf, Inf)),!is.na(cdm1)))
-		{
-			tdata <- cbind(dates,cdm1)
-			outcome1 <- try(rq(Calibrated_median ~ cdm1, tau=.8, data=tdata, weights=wghtsArch))
-			outcome2 <- try(rq(Hz ~ cdm2, tau=.2))
-			if(class(outcome1) == "rq" & class(outcome2) == "rq")
-			{
-				slope1 <- coefficients(outcome1)[2]
-				if(slope1>0){}
-				else {R[1] <- 1- outcome1$rho / rho0Arch}
-				slope2 <- coefficients(outcome2)[2]
-				if(slope2>0){}
-				else {R[2] <- 1 - outcome2$rho / rho0Hz}
-				cat(", R:", R, "\n")
-			} else{cat("\nrq failed\n")}
-		} else{cat("\nNA and/or Inf\n")}
-	} else{cat("\nsea\n")}
-	return(1-R) 
 }
 
 wghtsArch <- rep(1, times=length(coord[,1]))
@@ -420,17 +387,18 @@ allT <- TransitionFromRaster(landsea, transitionFunction="max", directions=8)
 correctionArch <- geoCorrection(allT, type="c", multpl=TRUE)
 correctionGen <- geoCorrection(allT, type="r", multpl=TRUE)
 
-seaMaskNA <- seaMask
-seaMaskNA[which(values(seaMask) == 0)] <- NA
-seaCost <- distance(seaMaskNA)
-seaT <- transition(seaCost,transitionFunction="mean",directions=8)
+
+seaT <- transition(seaCost,mean,directions=8)
+plot(seaCost)
+plot(raster(seaT));plot(raster(decay(seaT, 20000)))
+
 index2 <- adjacency(seaCost, which(values(seaCost) > 0), 1:ncell(seaCost), directions=8)
 
 #Get cell values
 cellArchaeo <- cellFromXY(seaMask, datesSP)
 cellSSR <- cellFromXY(seaMask, ssrSP)
-
-
+```
+```{r}
 #############################    ANALYSIS  ########################################
 
 #Calculate null models quantile regression
