@@ -14,7 +14,7 @@ output:
 
 ## Setup
 Load necessary packages.
-```{r messages = F}
+```{r messages = F, warning=F}
 library(raster) # for processing of raster maps
 library(tidyverse) # for data cleaning and plotting
 library(mgcv) # for fitting generalized additive model 
@@ -27,6 +27,41 @@ library(gganimate) # for animated plots
 # devtools::install_github("gavinsimpson/schoenberg")
 library(schoenberg)
 ```
+
+### Basemaps
+
+Define our study area as the supra-mediterranean region.
+```{r}
+bbox <- extent(-9.9, 45, 29.8, 50)
+```
+
+Import map of distances from the coast, and use to make masks to distinguish land and water areas ([source](http://worldgrids.org/doku.php/wiki:dicgsh1)).
+```{r}
+distance_coast <- raster('data/DICGSH1a.tif') %>% # import the map
+  crop(bbox) # crop to the study area
+
+euc <-  distance_coast %>%
+  reclassify(c(-Inf, Inf, 1)) # pure water to 0, all else to 1
+
+land_mask <- distance_coast %>%
+  reclassify(c(0, Inf, NA, -Inf, 0, 1)) 
+
+land_sea <- distance_coast %>%
+  reclassify(c(40, Inf, NA, -Inf, 40, 1))
+```
+
+```{r echo = F}
+land_sea %>%
+  as.data.frame(xy = T, na.rm = T) %>%
+  ggplot(aes(x, y, fill = layer)) +
+    geom_raster() +
+    geom_raster(data = as.data.frame(land_mask, xy = T, na.rm = T), fill = 'red') +
+    ggtitle('Land-sea mask', 'Source: Worldgrids.org') +
+    coord_quickmap() +
+    theme_void()
+```
+
+
 
 Import the database of 14C dates from neolithic sites.
 ```{r message = F}
@@ -41,21 +76,186 @@ load('data//med_region_gg.rda')
 
 ggplot(dates, aes(Long, Lat)) +
   geom_point(aes(color = Cal.BC)) +
-    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
   scale_color_distiller(palette = 'RdYlBu') +
-  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(29.8, 50)) +
   labs(title = 'Neolithic spread', subtitle = 'Initial site occupation') +
   theme_void()
 ```
 
+
 ## Least cost distance modeling
 First let's use the **gdistance** package to calculate how far all the sites in our database are from Jericho (which we use as the "first" site).
 
-Define our study area as the supra-mediterranean region.
+
+
+
+Start by generating a few simple transition matrices using different basemaps. We'll start with three purely geographic transition layers:
+1. Euclidean distance: calculate raw great circle euclidean distances from the starting point.
+2. Distance along land masses.
+3. Land and coast: distance across land + sea cells less than 40km away from the coast.
+
+Euclidean distances
 ```{r}
-bbox <- extent(-9.9, 45, 29.8, 50)
+con_euc <- transition(euc, min, 16, symm = T) #knight's move
 ```
 
+Generate a simple conductance matrix, where all land-land connections are set to 1 and all land-sea or sea-sea connections are set to 0.
+```{r}
+con_land <- transition(land_mask, min, 16, symm = T)
+```
+
+Repeat, allowing connections across less than 40km of sea.
+```{r}
+con_landsea <- transition(land_sea, min, 16, symm = T)
+```
+
+That last coastal map may be too simplistic. Let's calculate a continuous decay function as distance from the coast increases. Define a function to do this after Van Etten and Hijmans 2011
+```{r}
+decay <- function(x, p){
+	tm <- transitionMatrix(x)
+	tm@x[tm@x>0.1] <- (2^-(tm@x[tm@x>0.1]/p))
+	tm@x <- tm@x/max(tm@x)
+	transitionMatrix(x) <- tm
+	return(x)
+}
+```
+
+```{r}
+coastal_decay <- distance_coast %>%
+  mask(land_mask, inverse = T) %>%
+  crop(extent(yields_rast)) %>%
+  transition(mean, directions = 16)
+
+coastal_decay <- c(10, 20, 40, 80) %>%
+  map(~ decay(coastal_decay, .))
+```
+
+```{r}
+coastal_decay %>%
+  map(raster) %>%
+  brick %>%
+  `names<-`(c(10, 20, 40, 80)) %>% 
+  as.data.frame(xy = T, na.rm = T) %>%
+  gather(key = decay_constant, value, 3:6) %>%
+  ggplot(aes(x, y)) +
+    geom_raster(aes(fill = value)) +
+    facet_wrap(~decay_constant) +
+    scale_fill_distiller(palette = 'PuBuGn', direction = 1) +
+  ggtitle('Distance decay for coastal travel') +
+    coord_quickmap() +
+    theme_void()
+```
+
+Calculate intercell distances for later correction of conductance matrices.
+```{r}
+correction_lcp <- geoCorrection(con_euc, type = 'c', multpl = T)
+```
+## Crop Model Outputs
+
+Import the results of the DSSAT simulations. Create a raster brick.
+```{r}
+yields_rast <- list.files('data/paleoD_10nov16/paleoD3p1_monthlyyieldonly/whemmer', 
+                      pattern = '*ensemble*',
+                      full.names = T) %>%
+  map(raster) %>%
+  brick %>%
+  reclassify(c(-Inf, 0, 0, NA, NA, 0)) %>%
+  mask(., crop(land_mask, extent(.))) %>%
+  `names<-`(month.name) %>%
+  `projection<-`('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
+```
+
+Convert rasters to a data frame, adding in seasonal information.
+```{r}
+yields <- yields_rast %>% as.data.frame(xy = T, na.rm = T) %>%
+  gather(month, yield, 3:14) %>%
+  mutate(month = factor(month, levels = month.name),
+         season = case_when(month %in% month.name[c(12, 1, 2)] ~ 'Winter', 
+                            month %in% month.name[3:5] ~ 'Spring',
+                            month %in% month.name[6:8] ~ 'Summer',
+                            month %in% month.name[9:11] ~ 'Fall'),
+         season = factor(season, levels = c('Winter', 'Spring', 'Summer', 'Fall')))
+```
+
+```{r eval=F, echo = F}
+ggplot(yields, aes(x, y, fill = yield)) +
+  geom_raster() +
+  scale_fill_viridis() +
+  facet_wrap(~month) +
+  coord_quickmap() +
+  ggtitle('Mean wheat yields by planting month') +
+  theme_void()
+```
+
+```{r echo = F}
+yields %>%
+  group_by(x, y, season) %>%
+  filter(yield == max(yield)) %>%
+ggplot(aes(x, y)) +
+  geom_raster(aes(fill = yield)) +
+  scale_fill_viridis() +
+  facet_wrap(~season) +
+  ggtitle('Maximum wheat yields by planting season') +
+  coord_quickmap() +
+  theme_void()
+```
+
+
+```{r echo = F}
+yields %>%
+  group_by(x, y) %>%
+  filter(yield == max(yield)) %>%
+  filter(yield > 0) %>%
+ggplot(aes(x, y)) +
+  geom_raster(aes(fill = season, alpha = yield)) +
+  geom_point(data = dates, aes(Long, Lat)) +
+  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  ggtitle('Best planting seasons') +
+  theme_void()
+```
+
+```{r eval = F}
+vid <- ggplot(dat, aes(Long, Lat)) +
+  geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
+  geom_point(aes(frame = Cal.BC * -1, cumulative = T)) +
+    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
+  theme_void()
+
+gganimate(vid, filename = 'neo_spread.mp4', saver = 'mp4')
+```
+
+### Crop model costs
+Now use the yield data to calculate new conductance matrices that reflect variable crop yields. Define a function that represents the relative costs of moving from a cell with optimal plantint date in one month to a a cell with another optimal planting date. Use the "weight" parameter to determine the steepness of this function.
+
+```{r}
+month_fun <- function(x){
+  dist <- 6 - abs(abs(x[1] - x[2]) - 6) # distance in months
+  return(exp(- 1 * dist^2))
+}
+```
+
+```{r echo = F}
+expand.grid(difference = seq(0,6,.1), weight = seq(.1,1,.1)) %>%
+  mutate(test = exp(- weight * difference^2)) %>%
+  ggplot(aes(difference, test, group = weight, color = weight)) +
+  labs(x = 'Difference in optimal planting months', y = 'Conductance',
+       title = 'Functions') +
+  geom_line() +
+    theme_minimal()
+```
+Use this function to calculate a transitionlayer.
+```{r}
+con_month <- which.max(yields_rast) %>%
+  transition(month_fun, direction = 16)
+```
+
+## Cost Distances
 Find the location of Jericho to use as a starting point. 
 ```{r}
 jericho <- dates %>%
@@ -64,57 +264,32 @@ jericho <- dates %>%
   as.matrix
 ```
 
-Import map distinguishing land and water areas ([source](http://worldgrids.org/doku.php/wiki:dicgsh1)).
+Calculate the least cost distances from Jericho for each of the conductance layers, correcting for intercell distances.
 ```{r}
-distance_coast <- raster('data/DICGSH1a.tif') %>% # import the map
-  crop(bbox) # crop to the study area
-
-euc <-  distance_coast %>%
-  reclassify(c(-Inf, Inf, 1)) # pure water to 0, all else to 1
-
-land_mask <- distance_coast %>%
-  reclassify(c(0, Inf, NA, -Inf, 0, 1)) # pure water to 0, all else to 1
-
-land_sea <- distance_coast %>%
-  reclassify(c(40, Inf, NA, -Inf, 40, 1)) # pure water to 0, all else to 1
+coastal_decay %>%
+  map(~. + con_land) %>%
+  map(raster) %>%
+  map(plot)
+accumulation <- list(con_euc, con_land, con_landsea, month_only, month_sea) %>%
+  map(accCost, fromCoords = jericho) %>%
+  map(crop, y = extent(yields_rast)) %>%
+  brick
 ```
 
-```{r echo = F}
-land_sea %>%
-  as.data.frame(xy = T, na.rm = T) %>%
-  ggplot(aes(x, y, fill = layer)) +
-    geom_raster() +
-    geom_raster(data = as.data.frame(land_mask, xy = T, na.rm = T), fill = 'red') +
-    ggtitle('Land-sea mask', 'Source: Worldgrids.org') +
-    coord_quickmap() +
-    theme_void()
-```
 
+
+
+van etten reporduction
 ```{r}
-con_euc_c <- transition(euc, mean, 16, symm = T) %>% # knight's move
-  geoCorrection(type = 'c') # correct inter cell distances for latlon distortion
 
-con_euc_r <- transition(euc, mean, 16, symm = T) %>% # now for random walks
-  geoCorrection(type = 'r')
+#Geographic data: land/sea
+landT <- transition(land_mask, min, directions = 8)
+landT <- normalize(landT, method = 'symm')
+
 ```
 
-Generate a simple conductance matrix, where all land-land connections are set to 1 and all land-sea or sea-sea connections are set to 0.
-```{r}
-con_land_c <- transition(land_mask, min, 16, symm = T) %>%
-  geoCorrection(type = 'c')
 
-con_land_r <- transition(land_mask, min, 16, symm = T) %>% 
-  geoCorrection(type = 'r') 
-```
 
-Repeat, allowing connections across less than 40km of sea.
-```{r}
-con_landsea_c <- transition(land_sea, min, 16, symm = T) %>% 
-  geoCorrection(type = 'c')
-
-con_landsea_r <- transition(land_sea, min, 16, symm = T) %>% 
-  geoCorrection(type = 'r')
-```
 
 ```{r}
 accumulation <- list(con_euc_c, con_land_c, con_landsea_c) %>%
@@ -135,6 +310,26 @@ accumulation %>%
   scale_fill_viridis(direction = -1) +
   coord_quickmap() +
   theme_void()
+```
+```{r}
+
+```
+
+
+```{r echo = F}
+plot(accumulation)
+accumulation %>%
+  mask(crop(land_mask, extent(yields_rast))) %>%
+  as.data.frame(xy = T, na.rm =T) %>%
+  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_only = layer.4, month_sea = layer.5) %>%
+  gather(type, cost, 3:7) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = cost)) +
+  facet_wrap(~type, nrow = 3) +
+  scale_fill_viridis(direction = -1) +
+  coord_quickmap() +
+  theme_void()
+```
 ```
 
 Add the results to the sites data. (Why does raster:extract result in some na's and infs? something to do with the land sea boundary?)
@@ -249,70 +444,6 @@ ggraph() +
   coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50))
 ```
 
-
-
-```{r}
-yields_rast <- list.files('data/paleoD_10nov16/paleoD3p1_monthlyyieldonly/whemmer/', 
-                      pattern = '*ensemble*',
-                      full.names = T) %>%
-  map(raster) %>%
-  brick %>%
-  .[[c(1, 5:12, 2:4)]] %>%
-  reclassify(c(-Inf, 0, 0, NA, NA, 0)) %>%
-  mask(., crop(land_mask, extent(.))) %>%
-  `names<-`(month.name) %>%
-  `projection<-`('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
-```
-
-```{r}
-yields <- yields_rast %>% as.data.frame(xy = T, na.rm = T) %>%
-  gather(month, yield, 3:14) %>%
-  mutate(month = factor(month, levels = month.name),
-         season = case_when(month %in% month.name[c(12, 1, 2)] ~ 'Winter', 
-                            month %in% month.name[3:5] ~ 'Spring',
-                            month %in% month.name[6:8] ~ 'Summer',
-                            month %in% month.name[9:11] ~ 'Fall'),
-         season = factor(season, levels = c('Winter', 'Spring', 'Summer', 'Fall')))
-```
-
-```{r echo = F}
-ggplot(yields, aes(x, y, fill = yield)) +
-  geom_raster() +
-  scale_fill_viridis() +
-  facet_wrap(~month) +
-  coord_quickmap() +
-  theme_void()
-```
-
-```{r echo = F}
-yields %>%
-  group_by(x, y, season) %>%
-  filter(yield == max(yield)) %>%
-  filter(yield > 0) %>%
-ggplot(aes(x, y, fill = yield)) +
-  geom_raster() +
-  scale_fill_viridis() +
-  facet_wrap(~season) +
-  coord_quickmap() +
-  theme_void()
-```
-
-
-```{r echo = F}
-yields %>%
-  group_by(x, y) %>%
-  filter(yield == max(yield)) %>%
-  filter(yield > 0) %>%
-ggplot(aes(x, y)) +
-  geom_raster(aes(fill = season, alpha = yield)) +
-  geom_point(data = dates, aes(Long, Lat)) +
-  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
-  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
-  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
-  theme_void()
-```
-
-
 ```{r}
 dat2 %>%
   mutate(arrival = if_else(residuals <= 0, 'Late', 'Early')) %>%
@@ -328,110 +459,7 @@ ggplot(aes(Long, Lat)) +
 
 
 
-```{r}
-vid <- ggplot(dat, aes(Long, Lat)) +
-  geom_raster(data = best.month, aes(x, y, fill = Month, alpha = Yield)) +
-  geom_point(aes(frame = Cal.BC * -1, cumulative = T)) +
-    geom_path(data = med_region_gg, aes(long,lat, group = group)) +
-  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
-  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
-  labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
-  theme_void()
 
-gganimate(vid, filename = 'neo_spread.mp4', saver = 'mp4')
-```
-
-van etten reporduction
-```{r}
-decay <- function(x, p){
-	tm <- transitionMatrix(x)
-	tm@x[tm@x>0.1] <- (2^-(tm@x[tm@x>0.1]/p))
-	tm@x <- tm@x/max(tm@x)
-	transitionMatrix(x) <- tm
-	return(x)
-}
-
-plot(distance_coast)
-
-#Geographic data: land/sea
-landT <- transition(land_mask, min, directions = 8)
-landT <- normalize(landT, method = 'symm')
-index1 <- adjacency(seaMask, which(values(seaMask) == 1), which(values(seaMask) == 1), directions=8)
-
-landsea <- land_mask
-landsea <- setValues(landsea, rep(1,times=ncell(landsea)))
-allT <- transition(landsea, max, directions = 8)
-correctionArch <- geoCorrection(allT, type="c", multpl=TRUE)
-correctionGen <- geoCorrection(allT, type="r", multpl=TRUE)
-
-seaCost <- mask(distance_coast, land_mask, inverse = T)
-plot(seaCost);plot(raster(seaT))
-seaT <- transition(seaCost, mean, directions = 8)
-plot(raster(decay(seaT, 20) + landT))
-
-index2 <- adjacency(seaCost, which(values(seaCost) > 0), 1:ncell(seaCost), directions=8)
-```
-
-```{r}
-expand.grid(difference = seq(0,6,.1), weight = seq(.1,1,.1)) %>%
-  mutate(test = exp(- weight * difference^2)) %>%
-  ggplot(aes(difference, test, group = weight, color = weight)) +
-  geom_line()
-plot(1 / (100 + 0:6))
-
-
-1/0
-```
-
-```{r}
-month_fun <- function(x){
-  dist <- 6 - abs(abs(x[1] - x[2]) - 6)
-  return(exp(- 1 * dist^2))
-}
-month_fun(c(1,NA))
-sea_decay <- distance_coast %>%
-  mask(land_mask, inverse = T) %>%
-  crop(extent(yields_rast)) %>%
-  transition(mean, directions = 16) %>%
-  decay(60)
-
-plot(raster(sea_decay))
-plot(which.max(yields_rast))
-month_sea <- (transition(which.max(yields_rast), month_fun, direction = 16) + sea_decay) %>%
-  geoCorrection(type = 'c')
-month_only <- (transition(which.max(yields_rast), month_fun, direction = 16)) %>%
-  geoCorrection(type = 'c')
-plot(raster(month_only));plot(raster(month_sea))
-```
-
-```{r}
-accumulation <- list(con_euc_c, con_land_c, con_landsea_c, month_only, month_sea) %>%
-  map(accCost, fromCoords = jericho) %>%
-  map(crop, y = extent(yields_rast)) %>%
-  brick
-```
-
-
-```{r echo = F}
-plot(accumulation)
-accumulation %>%
-  mask(crop(land_mask, extent(yields_rast))) %>%
-  as.data.frame(xy = T, na.rm =T) %>%
-  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_only = layer.4, month_sea = layer.5) %>%
-  gather(type, cost, 3:7) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = cost)) +
-  facet_wrap(~type, nrow = 3) +
-  scale_fill_viridis(direction = -1) +
-  coord_quickmap() +
-  theme_void()
-```
-```
-
-
-```{r}
-plot(landsea)
-```
 ```{r}
 constr <- function(pv) 
 {
