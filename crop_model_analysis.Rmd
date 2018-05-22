@@ -93,17 +93,12 @@ Start by generating a few simple transition matrices using different basemaps. W
 
 Euclidean distances
 ```{r}
-con_euc <- transition(euc, min, 16, symm = T) #knight's move
+con_landsea <- transition(land_sea, max, 16)
 ```
 
 Generate a simple conductance matrix, where all land-land connections are set to 1 and all land-sea or sea-sea connections are set to 0.
 ```{r}
-con_land <- transition(land_mask, min, 16, symm = T)
-```
-
-Repeat, allowing connections across less than 40km of sea.
-```{r}
-con_landsea <- transition(land_sea, min, 16, symm = T)
+con_land <- transition(land_mask, min, 16)
 ```
 
 That last coastal map may be too simplistic. Let's calculate a continuous decay function as distance from the coast increases. Define a function to do this after Van Etten and Hijmans 2011
@@ -119,8 +114,6 @@ decay <- function(x, p){
 
 ```{r}
 coastal_decay <- distance_coast %>%
-  mask(land_mask, inverse = T) %>%
-  crop(extent(yields_rast)) %>%
   transition(mean, directions = 16)
 
 coastal_decay <- c(10, 20, 40, 80) %>%
@@ -138,14 +131,14 @@ coastal_decay %>%
     geom_raster(aes(fill = value)) +
     facet_wrap(~decay_constant) +
     scale_fill_distiller(palette = 'PuBuGn', direction = 1) +
-  ggtitle('Distance decay for coastal travel') +
+    ggtitle('Distance decay for coastal travel') +
     coord_quickmap() +
     theme_void()
 ```
 
 Calculate intercell distances for later correction of conductance matrices.
 ```{r}
-correction_lcp <- geoCorrection(con_euc, type = 'c', multpl = T)
+correction_lcp <- geoCorrection(con_landsea, type = 'c', multpl = T)
 ```
 ## Crop Model Outputs
 
@@ -157,7 +150,7 @@ yields_rast <- list.files('data/paleoD_10nov16/paleoD3p1_monthlyyieldonly/whemme
   map(raster) %>%
   brick %>%
   reclassify(c(-Inf, 0, 0, NA, NA, 0)) %>%
-  mask(., crop(land_mask, extent(.))) %>%
+  mask(., land_mask, maskvalue = 0) %>%
   `names<-`(month.name) %>%
   `projection<-`('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
 ```
@@ -262,44 +255,22 @@ jericho <- dates %>%
 
 Calculate the least cost distances from Jericho for each of the conductance layers, correcting for intercell distances.
 ```{r}
-coastal_decay %>%
-  map(~. + con_land) %>%
-  map(raster) %>%
-  map(plot)
-accumulation <- list(con_euc, con_land, con_landsea, month_only, month_sea) %>%
-  map(accCost, fromCoords = jericho) %>%
-  map(crop, y = extent(yields_rast)) %>%
-  brick
-```
-
-
-
-
-van etten reporduction
-```{r}
-
-#Geographic data: land/sea
-landT <- transition(land_mask, min, directions = 8)
-landT <- normalize(landT, method = 'symm')
-
-```
-
-
-
-
-```{r}
-accumulation <- list(con_euc_c, con_land_c, con_landsea_c) %>%
+distances <- c(con_landsea,
+               con_land,
+               con_month,
+               map(coastal_decay, ~. + con_land),
+               map(coastal_decay, ~. + con_month)) %>%
+  map(~ . * correction_lcp) %>%
   map(accCost, fromCoords = jericho) %>%
   brick
 ```
-
 
 ```{r echo = F}
-accumulation %>%
-  mask(land_mask) %>%
+distances %>%
+  mask(land_mask, maskvalue = 0) %>%
   as.data.frame(xy = T, na.rm =T) %>%
-  rename(euc = layer.1, land = layer.2, landsea = layer.3) %>%
-  gather(type, cost, 3:5) %>%
+  #rename(euc = layer.1, land = layer.2, landsea = layer.3, month_only = layer.4, month_sea = layer.5) %>%
+  gather(type, cost, 3:13) %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = cost)) +
   facet_wrap(~type, nrow = 3) +
@@ -307,40 +278,21 @@ accumulation %>%
   coord_quickmap() +
   theme_void()
 ```
-```{r}
 
-```
-
-
-```{r echo = F}
-plot(accumulation)
-accumulation %>%
-  mask(crop(land_mask, extent(yields_rast))) %>%
-  as.data.frame(xy = T, na.rm =T) %>%
-  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_only = layer.4, month_sea = layer.5) %>%
-  gather(type, cost, 3:7) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = cost)) +
-  facet_wrap(~type, nrow = 3) +
-  scale_fill_viridis(direction = -1) +
-  coord_quickmap() +
-  theme_void()
-```
-```
 
 Add the results to the sites data. (Why does raster:extract result in some na's and infs? something to do with the land sea boundary?)
 ```{r}
 costs <- dates %>%
   select(Long:Lat) %>%
   as.matrix %>%
-  raster::extract(accumulation, ., df = T) %>%
-  rename(euc = layer.1, land = layer.2, landsea = layer.3, month_land = layer.4, month_sea = layer.5) %>%
+  raster::extract(distances, ., df = T) %>%
+  #rename(euc = layer.1, land = layer.2, landsea = layer.3, month_land = layer.4, month_sea = layer.5) %>%
   cbind(dates, .) %>%
   select(-ID) %>%
-  gather(type, cost, euc:month_sea) %>%
+  gather(type, cost, 6:16) %>%
   nest(-type) %>%
   mutate(data = map(data, ~filter(., is.finite(cost)))) %>%
-  mutate(data = map(data, ~filter(., cost < 3.4e10))) # shouldnt have to do this!
+  mutate(data = map(data, ~filter(., cost < 1e10))) # shouldnt have to do this!
 ```
 
 
@@ -350,7 +302,7 @@ quantile_gam <- function(df){
     Cal.BC ~ s(cost, bs = 'cr'), 
            ~ s(cost, bs = 'cr')), 
     data = df,
-    qu = 0.9)
+    qu = 0.85)
 }
 
 make_preds <- function(x){
@@ -360,6 +312,13 @@ make_preds <- function(x){
   mutate(upper = fit + 2 * se.fit,
          lower = fit - 2 * se.fit)
 }
+```
+
+```{r}
+test <- costs$data[[1]]
+plot(qgam(Cal.BC ~ s(cost, bs = 'cr') + te(Long, Lat),
+     data = test,
+     qu = .95))
 ```
 
 ```{r}
@@ -402,21 +361,39 @@ plot(mod);plot(mod2); plot(mod3)
 ```
 
 ```{r}
-preds %>%
-  mutate(resid = Cal.BC - fit) %>%
-ggplot(aes(Long, Lat)) +
-  geom_point(aes(color = resid), size = 3) +
+test <- cbind(costs$data[[5]], pred = fits$preds[[5]]$fit) %>%
+  mutate(resid = Cal.BC - pred) %>%
+  filter(resid > 0)
+
+yields %>%
+  group_by(x, y) %>%
+  filter(yield == max(yield)) %>%
+  filter(yield >= 0) %>%
+ggplot(aes(x, y)) +
+  geom_raster(aes(fill = season, alpha = yield)) +
+  geom_point(data = test, aes(Long, Lat, color = resid), size = 3) +
   geom_path(data = med_region_gg, aes(long,lat, group = group)) +
-  scale_color_distiller(palette = 'RdYlBu', limits = c(-2500, 2500)) +
+  scale_color_distiller(palette = 'RdYlBu') +
+  coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
+  scale_fill_manual(values = c('#2b83ba', '#abdda4', '#d7191c', '#fdae61')) +
+  labs(title = 'Neolithic spread', subtitle = 'Initial site occupation') +
+  theme_void()
+
+which.max(yields_rast) %>%
+  as.data.frame(xy = T, na.rm = T) %>%
+ggplot(aes(x, y)) +
+  geom_raster(aes(fill = as.factor(layer))) +
+  geom_point(data = test, aes(Long, Lat, color = resid), size = 3) +
+  geom_path(data = med_region_gg, aes(long,lat, group = group)) +
+  scale_color_distiller(palette = 'RdYlBu') +
   coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50)) +
   labs(title = 'Neolithic spread', subtitle = 'Initial site occupation') +
   theme_void()
 ```
-Now add in seas with a distance decay function.
 
 
 
-```{r}
+```{r eval = F}
 library(tidygraph)
 library(ggraph)
 
@@ -440,7 +417,7 @@ ggraph() +
   coord_quickmap(xlim = c(-9.9, 45), ylim = c(30, 50))
 ```
 
-```{r}
+```{r eval = F}
 dat2 %>%
   mutate(arrival = if_else(residuals <= 0, 'Late', 'Early')) %>%
 ggplot(aes(Long, Lat)) +
@@ -452,124 +429,3 @@ ggplot(aes(Long, Lat)) +
   labs(title = 'Neolithic spread', subtitle = 'Initial site occupations over wheat planting season and yield') +
   theme_void()
 ```
-
-
-
-
-```{r}
-constr <- function(pv) 
-{
-	if(seaMask[cellFromXY(seaMask,SpatialPoints(t(as.matrix(c(pv[1],pv[2])))))] == 0) {con <- -1}
-	else{con <- 1}
-	return(con)
-}
-
-createTransition <- function(pv)
-{
-	pv[4] <- (1.1 ^ pv[4])/10
-	seaTi <- decay(seaT,pv[3])
-	seaTr <- normalize(seaTi , symm = TRUE) #normalize(seaTi, method="symm")
-	Trt <- seaTr * pv[4] + landT 
-	Trt <- Trt * correctionArch
-	return(Trt)
-}
-
-wghtsArch <- rep(1, times=length(coord[,1]))
-for (i in 1:length(coord[,1]))
-{
-	dists <- pointDistance(as.vector(coord[i,]),coord,type='GreatCircle')
-	wghtsArch[i] <- 1/(sum(dists<100000))
-}
-```
-
-
-```{r}
-#############################    ANALYSIS  ########################################
-
-#Calculate null models quantile regression
-rho0Arch <- rq(Calibrated_median ~ 1, tau=.8, data=dates, weights=wghtsArch)$rho
-rho0Hz <- rq(Hz ~ 1, tau=.2)$rho
-
-#SETTINGS
-xmin <- -110
-xmax <- -80
-ymin <- 8
-ymax <- 25
-
-#Get solutions
-sol1 <- nsga2(RR, 4, 2,
-	generations=60, 
-	popsize=200,
-	lower.bounds=c(xmin,ymin, 1000, -100), 
-	upper.bounds=c(xmax,ymax, 200000, 100), 
-	constraints=constr
-	)
-
-#Format and store solutions
-sol <- cbind(sol1$par,sol1$value,sol1$pareto.optimal)
-sol <- sol[sol[,7] == 1,]
-sol <- unique(sol)
-sol <- sol[order(sol[,5]),]
-sol[,5] <- 1 - sol[,5]
-sol[,6] <- 1 - sol[,6]
-write.csv(sol,"ParetoOptimalSolutions2.csv")
-
-#Read solution into memory and select representative solutions
-sol <- read.csv("ParetoOptimalSolutions.csv", row.names=1)
-selectSol <- as.numeric(rownames(pam(sol[,1:2], 8, metric="euclidean")$medoids))
-selectSol <- c(selectSol,145)
-
-#Table 1
-Table1 <- sol[selectSol,1:6]
-Table1[,4] <- (1.1 ^ Table1[,4])/10
-colnames(Table1) <- c("Longitude","Latitude","p2","p1","R1 Arch","R1 Gene")
-rownames(Table1) <- LETTERS[1:9]
-
-#Look at representative solutions for different values of theta
-theta <- c(0.01, 0.1, 0.5, 1, 1.5, 2)
-
-for(i in c(6,9))#length(selectSol))
-{
-	x <- selectSol[i]
-	pv <- unlist(sol[x,1:6])
-	origin <- SpatialPoints(t(as.matrix(pv[1:2])))
-	Tr <- createTransition(pv)
-	for(th in 2:6) 
-	{
-		PI <- pathInc(Tr, origin, ssrSP, type=c("divergent","joint"), theta = theta[th])
-		div <- PI$divergent
-		joint <- PI$joint
-		dataGenGeo <- as.data.frame(cbind(joint, div, geoDist))
-		write.csv(dataGenGeo,paste("dataGenGeoT", LETTERS[i], "theta=", theta[th], sep=""))
-	}
-}
-
-resultR2 <- matrix(nrow=length(theta),ncol=length(selectSol))
-resultSign1 <- matrix(nrow=length(theta),ncol=length(selectSol))
-resultSign2 <- matrix(nrow=length(theta),ncol=length(selectSol))
-resultCoeff1 <- matrix(nrow=length(theta),ncol=length(selectSol))
-resultCoeff2 <- matrix(nrow=length(theta),ncol=length(selectSol))
-
-for(i in 1:length(selectSol))
-{
-	for(th in 1:length(theta))
-	{
-		dataGG <- read.csv(paste("dataGenGeoT", LETTERS[i], "theta=", theta[th], sep=""))
-		dataGG <- as.data.frame(cbind(ssrDist,dataGG))
-		result <- permReg(ssrDist ~ joint + div, dat=dataGG, perms = 999)
-		resultR2[th,i] <- result$r.square
-		resultSign1[th,i] <- result$significance.terms[1]
-		resultSign2[th,i] <- result$significance.terms[2]
-		resultCoeff1[th,i] <- result$coeff[2]
-		resultCoeff2[th,i] <- result$coeff[3]		
-	}
-}
-
-#Table 2
-resultR2 <- round(resultR2, digits=3)
-rownames(resultR2) <- theta
-colnames(resultR2) <- LETTERS[1:9]
-
-#############################    END ANALYSIS  #
-```
-
