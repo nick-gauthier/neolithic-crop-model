@@ -32,35 +32,31 @@ library(schoenberg)
 
 Define our study area as the supra-mediterranean region.
 ```{r}
-bbox <- extent(-9.9, 45, 29.8, 50)
+bbox <- extent(-9.9, 45, 30, 50) # switch 30 to 29.8 to keep extra site in
 ```
 
 Import map of distances from the coast, and use to make masks to distinguish land and water areas ([source](http://worldgrids.org/doku.php/wiki:dicgsh1)).
 ```{r}
 distance_coast <- raster('data/DICGSH1a.tif') %>% # import the map
-  crop(bbox) # crop to the study area
+  crop(bbox) %>% # crop to the study area
+  reclassify(c(-Inf, 0, 0))
 
-euc <-  distance_coast %>%
-  reclassify(c(-Inf, Inf, 1)) # pure water to 0, all else to 1
+land_sea <-  distance_coast %>%
+  reclassify(c(-Inf, Inf, 1)) 
 
 land_mask <- distance_coast %>%
-  reclassify(c(0, Inf, NA, -Inf, 0, 1)) 
-
-land_sea <- distance_coast %>%
-  reclassify(c(40, Inf, NA, -Inf, 40, 1))
+  reclassify(c(0, Inf, 0, -Inf, 0, 1)) # pure water to 0, all else to 1
 ```
 
 ```{r echo = F}
-land_sea %>%
+land_mask %>%
   as.data.frame(xy = T, na.rm = T) %>%
   ggplot(aes(x, y, fill = layer)) +
     geom_raster() +
-    geom_raster(data = as.data.frame(land_mask, xy = T, na.rm = T), fill = 'red') +
     ggtitle('Land-sea mask', 'Source: Worldgrids.org') +
     coord_quickmap() +
     theme_void()
 ```
-
 
 
 Import the database of 14C dates from neolithic sites.
