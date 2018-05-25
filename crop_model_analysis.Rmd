@@ -94,6 +94,11 @@ jericho <- dates %>%
   filter(Site_Name == 'Jericho') %>% # get the entry for Jericho
   select(Long:Lat) %>% # pull the location information
   as.matrix # convert to a matrix
+
+cayonu <- dates %>%
+  filter(Cal.BC == max(Cal.BC)) %>% # get the entry for Jericho
+  select(Long:Lat) %>% # pull the location information
+  as.matrix # convert to a matrix
 ```
 
 Now generate a few simple distance matrices using 3 different geographical models:
@@ -103,10 +108,17 @@ Now generate a few simple distance matrices using 3 different geographical model
 
 First we calculate the simple great circle distance from all sites to Jericho, as a baseline metric of geographic diffision. 
 ```{r}
-gc_dist <- dates %>% # start with the 14C databse
+gc_dist_jericho <- dates %>% # start with the 14C databse
   select(Long:Lat) %>% # pull out the locations
   as.matrix %>% # convert into matrix format
   pointDistance(jericho, ., lonlat = T) # calculate great circle distances
+
+gc_dist_cayonu <- dates %>% # start with the 14C databse
+  select(Long:Lat) %>% # pull out the locations
+  as.matrix %>% # convert into matrix format
+  pointDistance(cayonu, ., lonlat = T) # calculate great circle distances
+
+gc_dist_both <- pmin(gc_dist_jericho, gc_dist_cayonu)
 ```
 
 
@@ -141,7 +153,7 @@ The parameter **p** in the above function is the conductance half value of dista
 coastal_decay <- distance_coast %>% # start with the distance to the coast map
   transition(mean, directions = 16) # turn into a transition matrix
 
-coastal_decay <- seq(10, 90, 10) %>% # different values for p
+coastal_decay <- c(15, 50, 150, 500) %>% # different values for p
   map(~ decay(coastal_decay, .)) # apply the decay function to the transition matrix for each value of p
 ```
 
@@ -149,9 +161,9 @@ coastal_decay <- seq(10, 90, 10) %>% # different values for p
 coastal_decay %>%
   map(raster) %>%
   brick %>%
-  `names<-`(factor(paste0('p', seq(10, 90, 10)))) %>% 
+  `names<-`(factor(paste0('p', c(15, 50, 150, 500)))) %>% 
   as.data.frame(xy = T, na.rm = T) %>%
-  gather(key = decay_constant, value, 3:11) %>%
+  gather(key = decay_constant, value, 3:6) %>%
   ggplot(aes(x, y)) +
     geom_raster(aes(fill = value)) +
     facet_wrap(~decay_constant) +
@@ -169,20 +181,35 @@ correction_lcp <- geoCorrection(con_landsea, type = 'c', multpl = T)
 
 Calculate the least cost distances from Jericho for each of the conductance layers, correcting for intercell distances.
 ```{r}
-distances <- c(con_landsea, # put everything together in a list
+distances_jericho <- c(con_landsea, # put everything together in a list
                con_land,
                map(coastal_decay, ~. + con_land)) %>% # combine land and sea conductances
   map(~ . * correction_lcp) %>% # apply the geocorrection
   map(accCost, fromCoords = jericho) %>% # calculate the accumulated cost distances
   brick %>% # convert to a raster brick
-  `names<-`(c('Euclidean distance', 'Land only', paste('p', seq(10, 90, 10))))
+  `names<-`(c('Euclidean distance', 'Land only', paste0('p', c(15, 50, 150, 500))))
+distances_cayonu<- c(con_landsea, # put everything together in a list
+               con_land,
+               map(coastal_decay, ~. + con_land)) %>% # combine land and sea conductances
+  map(~ . * correction_lcp) %>% # apply the geocorrection
+  map(accCost, fromCoords = cayonu) %>% # calculate the accumulated cost distances
+  brick %>% # convert to a raster brick
+  `names<-`(c('Euclidean distance', 'Land only', paste0('p', c(15, 50, 150, 500))))
+distances_both <- c(con_landsea, # put everything together in a list
+               con_land,
+               map(coastal_decay, ~. + con_land)) %>% # combine land and sea conductances
+  map(~ . * correction_lcp) %>% # apply the geocorrection
+  map(accCost, fromCoords = rbind(cayonu,jericho)) %>% # calculate the accumulated cost distances
+  brick %>% # convert to a raster brick
+  `names<-`(c('Euclidean distance', 'Land only', paste0('p', c(15, 50, 150, 500))))
+distances <- brick(c(distances_jericho, distances_cayonu, distances_both))
 ```
 
 ```{r echo = F}
 distances %>%
   mask(land_mask, maskvalue = 0) %>% # mask the distances to land areas
   as.data.frame(xy = T, na.rm =T) %>%
-  gather(type, cost, 3:13) %>%
+  gather(type, cost, 3:8) %>%
   #filter(cost < 1e10) %>% # remove outliers (inaccessible islands)
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = cost)) +
@@ -199,16 +226,17 @@ costs <- dates %>%
   select(Long:Lat) %>%
   as.matrix %>%
   raster::extract(distances, ., df = T) %>%
-  cbind(dates, great_circle = gc_dist, .) %>%
+  cbind(dates, great_circle_jericho = gc_dist_jericho, great_circle_cayonu = gc_dist_cayonu, great_circle_both = gc_dist_both, .) %>%
   select(-ID) %>%
-  gather(type, cost, 6:17) %>%
+  gather(type, cost, 6:26) %>%
   nest(-type) %>%
-  mutate(data = map(data, ~filter(., is.finite(cost)))) %>%
-  mutate(data = map(data, ~filter(., cost < 1e10))) # remove outliers
+  mutate(data = map(data, ~filter(., is.finite(cost))))
+
+pairs(distances)
 ```
 
 ### Statistical Inference
-Now that we've generated a bunch of estimates of the "costs" of moving from Jericho to all the other sites, let's see how well these cost maps can predict the actual pattern of arrival times encoded in the 14C dates. Because we have at least two phases of spread (cultural and demic) a single linear model would be insufficient to capture the dynamics we are interested in, as that approach assumes a constant rate of spread. Instead we fit splines to the data, allowing the spread rates to be flexibly be estimated from the data themselves and vary in time. Furthermore, instead of regressing against the mean, we use a quantile regression approach to model the top 15th percentile of the earliest sites. This approach ensures that the signal of the initial, "colonizer" sites in a given area is not swamped out by later foundations from after the initial introduction of farming.
+Now that we've generated a bunch of estimates of the "costs" of moving from Jericho to all the other sites, let's see how well these cost maps can predict the actual pattern of arrival times encoded in the 14C dates. Because we have at least two phases of spread (cultural and demic) a single linear model would be insufficient to capture the dynamics we are interested in, as that approach assumes a constant rate of spread. Instead we fit splines to the data, allowing the spread rates to be flexibly be estimated from the data themselves and vary in time. Furthermore, instead of regressing against the mean, we use a quantile regression approach to model the top 10th percentile of the earliest sites. This approach ensures that the signal of the initial, "colonizer" sites in a given area is not swamped out by later foundations from after the initial introduction of farming.
 
 First define two helper functions. The *quantile_gam()* function is where the GAM actual get's fit. We write and save it here, so we can easily apply it to all the different datasets automatically.
 ```{r}
@@ -217,7 +245,8 @@ quantile_gam <- function(df){
     Cal.BC ~ s(cost, bs = 'cr'), 
            ~ s(cost, bs = 'cr')), 
     data = df,
-    qu = 0.8)
+    qu = 0.9,
+    multicore = T)
 }
 ```
 
@@ -237,10 +266,11 @@ Now fit a quantile GAM to each of the different cost distance datasets, extracti
 fits <- costs %>%
   mutate(mod = map(data, quantile_gam),
          aic = map_dbl(mod, AIC),
-         reml = map_dbl(mod, 'gcv.ubre'),
          preds = map(mod, make_preds))
-fits$mod
-  walk(fits$mod, ~check(.$calibr, 2))
+
+fits$mod[[1]]
+
+#walk(fits$mod, ~check(.$calibr, 2))
 ```
 
 Let's look at the results, specifically comparing the AICs across each model. At first glance, the land only model has the best fit. But wait! The land only model was fit on ~60 fewer sites, because by definition it cannot account for arrival times at island sites. With a smaller sample size, the AIC must be lower, so we should discount this model. So here the suggestion is that the land-sea model with a small (10) conductance half value parameter fits the data best. This is a consistent with Neolithic farmers capable of traveling over the sea, but only very short distances away from the coast.
@@ -248,12 +278,22 @@ Let's look at the results, specifically comparing the AICs across each model. At
 fits %>%
   arrange(aic) %>%
   select(type, aic) %>% 
+  #filter(type != 'Land.only') %>%
+  mutate(doop = aic - min(aic))
   ggplot(aes(as.character(type), aic)) +
   geom_point()
 fits %>%
   arrange(reml) %>%
   select(type, reml)
 ```
+```{r}
+test <- rerun(100, costs %>%
+  mutate(mod = map(data, quantile_gam),
+         aic = map_dbl(mod, AIC)) %>%
+  select(type, aic)) %>% bind_rows
+```
+
+
 Just to make sure, let's rerun the above analysis, limiting the the regressions only to sites on land (so that the AICs across the land and other models will be comparable). Of course, this isn't ideal either because part of the benefit of including the land-sea models is that they can account for arrival times on islands. Now we see the best fitting model has p = 70, with p = 10 coming in second. Let's stick with the p = 10 model, as it 
 ```{r echo = F}
 dates %>%
@@ -264,12 +304,12 @@ dates %>%
   select(-ID) %>%
   drop_na() %>%
   filter(is.finite(Land.only)) %>%
-  gather(type, cost, 6:17) %>%
+  gather(type, cost, 6:12) %>%
   nest(-type) %>% 
   mutate(mod = map(data, quantile_gam),
          aic = map_dbl(mod, AIC)) %>%
   arrange(aic) %>%
-  select(type, aic) %>%
+  select(type, aic) #%>%
   .$aic %>%
   plot
 ```
@@ -440,23 +480,6 @@ costs <- dates %>%
 ```
 
 
-```{r}
-quantile_gam <- function(df){
-  qgam(list(
-    Cal.BC ~ s(cost, bs = 'cr'), 
-           ~ s(cost, bs = 'cr')), 
-    data = df,
-    qu = 0.85)
-}
-
-make_preds <- function(x){
-  predict(x, type = 'response', se = T) %>%
-  map(~.[,1]) %>%
-  bind_cols %>%
-  mutate(upper = fit + 2 * se.fit,
-         lower = fit - 2 * se.fit)
-}
-```
 
 ```{r}
 test <- costs$data[[1]]
@@ -475,19 +498,6 @@ fits
 
 
 ```{r}
-plot_results <- function(x){
-  print(ggplot(x, aes(cost, Cal.BC)) +
-  geom_pointrange(aes(ymin = Cal.BC - Cal.BC.SD, 
-                      ymax = Cal.BC + Cal.BC.SD,  
-                      alpha = (1 / Cal.BC.SD) ^ 2), fatten = 2) +
-  geom_line(aes(y = fit), color = 'red') +
-  geom_line(aes(y = lower), linetype = 2, color = 'red') +
-  geom_line(aes(y = upper), linetype = 2, color = 'red') +
-  xlim(0, 5.5e6) +
-  theme_bw())
-}
-
-
 map2(fits$data, fits$preds, bind_cols) %>%
   walk(plot_results)
 ```
@@ -502,6 +512,12 @@ mod3 <- gam(Cal.BC ~ s(cost, bs = 'cr'),
             data = costs$data[[3]],
             weights = (1/costs$data[[3]]$Cal.BC.SD)^2 / mean((1/costs$data[[3]]$Cal.BC.SD)^2))
 plot(mod);plot(mod2); plot(mod3)
+
+AIC(mod)
+replicate(100, AIC(qgam(Cal.BC ~ s(cost, bs = 'cr'), 
+            data = costs$data[[4]],
+            qu = .9))) -> test
+hist(test)
 ```
 
 ```{r}
