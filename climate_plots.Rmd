@@ -1,0 +1,96 @@
+---
+title: "SUPPLEMENTARY INFORMATION"
+subtitle: '**paper title goes here**'
+author: 
+date: 'Last Updated: `r Sys.Date()`'
+link-citations: yes
+bibliography: bibliography.bibtex
+urlcolor: blue
+mainfont: Times New Roman
+monofont: Monaco
+geometry: margin=1in
+fontsize: 12pt
+header-includes:
+- \usepackage{marginnote}
+output:
+  pdf_document:
+    fig_height: 5
+    fig_width: 10
+    highlight: pygments
+    latex_engine: lualatex
+    toc: no
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    theme: spacelab
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+Long-term monthly climate means for the mid-Holocene were estimated by downscaling an ensemble of PMIP3 simulations [@Braconnot2012]. A perfect prognosis approach was employed, in which regression-based transfer functions were first used to predict small-scale temperature and precipitation climatologies [@Deblauwe2016] from large-scale atmospheric reanalysis variables from present-day observations [@Dee2011], and then applied to simulated large-scale atmospheric variables from the mid-Holocene. Topographic predictors derived from a digital elevation model [@Jarvis2008] were also included to capture additional small-scale spatial heterogeneity. These transfer functions were estimated using a generalized additive model (GAM) in order to account for non-normal data distributions and nonlinear predictor-predictand relationships [@Vrac2007;@Barton2017]. Model selection was carried out using a combination of restricted maximum likelihood for smoothness selection and AIC [@Wood2006a]. Temperature was modeled as Gaussian with an identity link function, with 2-meter air temperature, mean sea level pressure, and elevation selected as predictors. Precipitation was downscaled with a two-step hurdle process, with precipitation occurrence modeled as binomial with a logit link with 2-meter air temperature and convective precipitation rate as predictors and precipitation accumulation as Gamma distributed with a log link and mean sea level pressure, total column water, large scale precipitation rate, convective precipitation rate, elevation, and distance from the coast as predictors. After fitting to the present-day reanalysis data, the GAMs were used to downscale the PMIP3 simulation outputs. Both the ensemble mean atmospheric fields and the outputs from each individual model were downscaled separately, to assess the sensitivity of the downscaled fields to climate-model biases. The resulting high-resolution monthly climatologies were then temporally downscaled to daily resolution using the MarkSim weather generator. In all cases, additional data on the number of rainy days per month from the CCSM4 model were also used to parameterize the weather generator, as that was the only model for which daily data for the mid-Holocene were readily available.
+
+```{r echo = F, warning = F, message = F}
+# load packages
+library(raster)
+library(tidyverse)
+
+# import sites data
+site_names <- c("Jericho", "Vougliameni Limni", "Rippa Tetta", "Baume de Fontbregoua","Mas d'Is")
+sites <- read_csv('data/cs_dates_4_grass.csv') %>%
+  filter(Long != 0) %>% 
+  dplyr::select(Site_Name, Long, Lat) %>%
+  filter(Site_Name %in% site_names) %>%
+  arrange(-Long) %>%
+  mutate(Site_Name = factor(Site_Name, levels = Site_Name))%>%
+    mutate(ID = factor(1:n()),
+           region = factor(c('Levant', 'Greece', 'Italy', 'France', 'Spain'), levels = c('Levant', 'Greece', 'Italy', 'France', 'Spain')))
+
+# import climate data
+prc_mh <- brick('~/Dropbox/Downscaled CCSM4 Mid Holocene/Ensemble/ensemble_prc_mh6k.tif')
+tmp_mh <- (brick('~/Dropbox/Downscaled CCSM4 Mid Holocene/Ensemble/ensemble_tmn_mh6k.tif') + brick('~/Dropbox/Downscaled CCSM4 Mid Holocene/Ensemble/ensemble_tmx_mh6k.tif')) / 2
+load('observed_climate.Rda')
+
+# define a function to extract data at given sites form all the rasters
+rast_to_dat <- function(x){
+  x %>%
+  raster::extract(as.matrix(sites[,2:3]), buffer = 10000, df = T) %>%
+  as_tibble %>%
+  `names<-`(c('ID',1:12)) %>%
+  mutate(cell = 1:n()) %>%
+  gather(month, value, 2:13) %>%
+  mutate(ID = as.factor(ID),
+         month = as.numeric(month)) %>%
+  left_join(sites, by = 'ID')
+}
+
+# apply function to all the rasters
+prc_mh_dat <- rast_to_dat(prc_mh) %>% mutate(var = 'Precipitation (mm)', period = 'Mid-Holocene')
+tmp_mh_dat <- rast_to_dat(tmp_mh) %>% mutate(var = 'Temperature (°C)', period = 'Mid-Holocene')
+prc_mod_dat <- rast_to_dat(p.obs) %>% mutate(var = 'Precipitation (mm)', period = 'Present')
+tmp_mod_dat <- rast_to_dat(tmean.obs) %>% mutate(var = 'Temperature (°C)', period = 'Present')
+ 
+# combine and plot
+bind_rows(prc_mh_dat, tmp_mh_dat) %>%
+  mutate(var = factor(var, levels = c('Temperature (°C)', 'Precipitation (mm)'))) %>%
+ggplot(aes(month, value)) +
+     geom_line(alpha = .1, data = bind_rows(prc_mod_dat, tmp_mod_dat), 
+               stat = 'smooth', aes(y=value, x=month, group = interaction(cell, period)), 
+               formula = y ~ s(x, k = 12, bs = 'cc'), method = "gam", se = F) +
+   geom_line(alpha = .8, stat = 'smooth', 
+             aes(y=value, x=month, group = interaction(cell, period), color = var), 
+             formula = y ~ s(x, k = 12, bs = 'cc'), method = "gam", se = F) +
+  scale_color_discrete(name = '') +
+  scale_x_continuous(labels = month.abb[c(2,5,8,11)], breaks = c(2,5,8,11), minor_breaks = NULL) +
+  labs(x = 'Month', y = '', title = 'Seasonal Cycle of Temperature and Preciptiation', 
+       subtitle = ' Mid-Holocene to present, present-day observations in grey')+
+  facet_grid(var~region, scales = 'free_y', switch = 'y') +
+  theme_minimal(base_size = 14) + 
+  scale_y_continuous(position = 'right') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = 'bottom')
+
+# save the result at a pleasing aspect ratio
+#ggsave('seasonal_cycle.png', width = 11, height = 6)
+```
+
+## References
