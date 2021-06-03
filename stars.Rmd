@@ -1,0 +1,1642 @@
+---
+title: "EOF downscaling of Mid Holocene climate"
+author: "Nick Gauthier"
+date: "3/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(raster)
+library(tidyverse)
+library(stars)
+library(units)
+library(tidyEOF)
+sf_use_s2(FALSE)
+```
+
+
+# Setup
+
+Setup the bounding box and a reference 5' raster for reprojection.
+
+```{r}
+bbox <- extent(c(-10, 45, 30, 50))
+
+ref <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 0.0833333)
+ref_sim <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 1)
+
+
+coast <- rnaturalearth::ne_coastline(scale = 'medium', returnclass = 'sf') %>% 
+  st_crop(ref)
+countries <- rnaturalearth::ne_countries(scale = 'medium', returnclass = 'sf') %>% 
+  st_crop(ref)
+```
+Import the observational data.
+warping it directly looses the unit conversion info from the geotiff file!
+```{r}
+prec_obs <- list.files('~/Downloads', full.names = TRUE, pattern = '*CHELSA_pr*') %>%
+             read_stars(along = 'time') %>% 
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('prec')
+
+tmin_obs<- list.files('~/Downloads', full.names = TRUE, pattern = '*CHELSA_tasmin*') %>%
+             read_stars(along = 'time') %>%
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('tmin') 
+tmax_obs <- list.files('~/Downloads', full.names = TRUE, pattern = '*CHELSA_tasmax*') %>%
+             read_stars(along = 'time') %>%
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('tmax')
+
+obs <- c(prec_obs,
+           tmin_obs,
+           tmax_obs) %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec / 10, mm/month),
+         tmin = set_units(tmin / 10, K) %>% set_units(degree_C),
+         tmax = set_units(tmax / 10, K) %>% set_units(degree_C))
+```
+## simulations
+Now import the simulations.
+```{r}
+prec_ccsm2 <- brick('/Volumes/Data/GCM/b40.20th.track1.1deg.005.cam2.h0.PRECT.185001-200512.nc') %>%
+    .[[1465:1872]] %>% # 34 years
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>% 
+  st_as_stars() %>%
+    st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  setNames('prec2')
+
+prec_ccsm <- brick('~/Downloads/pr_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>% # 34 years
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  setNames('prec')
+
+tmin_ccsm <- brick('~/Downloads/tasmin_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>%
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+    st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  setNames('tmin')
+
+tmax_ccsm <- brick('~/Downloads/tasmax_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>%
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+    st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  setNames('tmax')
+
+ccsm_recent <- c(prec_ccsm, tmin_ccsm, tmax_ccsm, prec_ccsm2) %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec, mm/s) %>% set_units(mm/month),
+         prec2 = set_units(prec2, m/s) %>% set_units(mm/month),
+        tmin = set_units(tmin, K) %>% set_units(degree_C),
+         tmax = set_units(tmax, K) %>% set_units(degree_C))
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = obs['prec']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c() +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = obs['tmax']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option = 'magma') +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = obs['tmin']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option = 'magma') +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = ccsm_recent['prec']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(limits = c(0, 290)) +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = ccsm_recent['prec2']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(limits = c(0, 290)) +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = ccsm_recent['tmax']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option = 'magma') +
+  geom_sf(data = coast) +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = ccsm_recent['tmin']) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option = 'magma') +
+  geom_sf(data = coast) +
+  theme_bw()
+```
+```{r}
+ggplot() +
+  geom_stars(data = obs['prec']) +
+  scale_fill_viridis_c() +
+  geom_sf(data = countries, fill = NA) +
+  geom_sf(data = coast) +
+  theme_bw()
+```
+## ECMWF obs
+
+```{r}
+ecmwf_cp <- brick('data/ERAinterim_prec.nc', var ='cp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out') %>%
+  #disaggregate(fact = 4, method = 'bilinear') %>%
+  stackApply(indices = 1:12, fun = mean)
+
+ecmwf_lsp <- brick('data/ERAinterim_prec.nc', var ='lsp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out') %>%
+ #   disaggregate(fact = 4, method = 'bilinear') %>%
+  stackApply(indices = 1:12, fun = mean)
+
+
+era_pr <- st_as_stars(ecmwf_cp + ecmwf_lsp) %>%
+      st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip * 30, m) %>% set_units(mm))
+
+plot(era_pr)
+```
+
+
+## PCA
+
+```{r}
+get_pcs(obs['prec']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+get_pcs(ccsm_recent['prec']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+get_pcs(ccsm_recent['prec2']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+
+get_pcs(obs['tmin']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+get_pcs(ccsm_recent['tmin']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+get_pcs(obs['tmax']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+get_pcs(ccsm_recent['tmax']) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(ccsm_recent['tmin'],get_patterns(ccsm_recent['tmin'], k = 2))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(ccsm_recent['tmax'],get_patterns(ccsm_recent['tmax'], k = 2))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(ccsm_recent['prec'],get_patterns(ccsm_recent['prec'], k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(ccsm_recent['prec2'],get_patterns(ccsm_recent['prec2'], k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(obs['tmin'],get_patterns(obs['tmin'], k = 2))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(obs['tmax'],get_patterns(obs['tmax'], k = 2))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(obs['prec'],get_patterns(obs['prec'], k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = get_correlation(obs['prec'] %>% st_crop(countries),get_patterns(obs['prec'] %>% st_crop(countries), k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+```
+
+
+```{r}
+plot_amps(get_patterns(ccsm_recent['prec']))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+plot_amps(get_patterns(ccsm_recent['prec2']))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+plot_amps(get_patterns(obs['prec']))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+```
+
+```{r}
+bind_rows(get_patterns(ccsm_recent['prec'])$amplitudes %>% rename(PC3 = PC4, PC4 = PC3),
+          get_patterns(ccsm_recent['prec2'])$amplitudes  %>% mutate(PC3 = PC3 * -1),
+          get_patterns(obs['prec'])$amplitudes %>% rename(PC3 = PC2, PC2 = PC4, PC4 = PC3) %>% mutate(PC3 = PC3 * -1, PC2 = PC2 * -1),
+          get_patterns(mh['prec'])$amplitudes %>% mutate(PC2 = PC2 * -1, PC4 = PC4 * -1), 
+          get_patterns(pi['prec'])$amplitudes %>% mutate(PC3 = PC3 * -1),
+          get_patterns(chelsa1['prec'])$amplitudes %>% rename(PC2 = PC3, PC3 = PC2) %>% mutate(PC3 = PC3 * -1, PC4 = PC4 * -1),
+          get_patterns(era_pr, k = 4)$amplitudes %>% mutate(PC2 = PC2 * -1, PC4 = PC4 * -1),.id = 'type') %>%
+  pivot_longer(-c(type, time)) %>%
+  ggplot(aes(time, value, color = type)) +
+  geom_point() + 
+  facet_wrap(~name) +
+  geom_line() +
+ # geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) +
+  scale_x_continuous(breaks = 1:12) +
+  theme_bw()
+  
+```
+ now try the mid Holocene
+
+
+```{r}
+mh <- brick('/Volumes/Data/Data/PMIP3 Data/MH/pr/pr_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+      st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec') %>% 
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+
+mh_sd <- brick('/Volumes/Data/Data/PMIP3 Data/MH/pr/pr_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'pr_var') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, kg^2/m^4/s^2))
+
+ggplot() + geom_stars(data = mh_sd) + facet_wrap(~time)
+
+pi <- brick('~/Downloads/pr_Aclim_CCSM4_piControl_r1i1p1_025001-130012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+      st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec')%>%
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+```
+
+```{r}
+chelsa1 <- prec_obs <- list.files('/Volumes/Data/Data/CHELSA/prec', full.names = TRUE, pattern = '*CHELSA_pr*') %>%
+             read_stars(along = 'time') %>% 
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('prec') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec, mm/month))
+
+ggplot() + geom_stars(data = st_apply(obs, 1:2, sum)) +  scale_fill_viridis_c()
+ggplot() + geom_stars(data = st_apply(chelsa1, 1:2, sum)) +  scale_fill_viridis_c()
+ggplot() + geom_stars(data = st_apply(ccsm_recent, 1:2, sum)) +  scale_fill_viridis_c()
+ggplot() + geom_stars(data = st_apply(mh, 1:2, sum)) +  scale_fill_viridis_c()
+ggplot() + geom_stars(data = st_apply(pi, 1:2, sum)) +  scale_fill_viridis_c()
+ggplot() + geom_stars(data = st_apply(era_pr, 1:2, sum)) +  scale_fill_viridis_c()
+
+```
+
+### making predictions
+```{r}
+m1 <- predict_cca(get_patterns(ccsm_recent['prec'], k = 4),
+              get_patterns(obs['prec'], k = 4),
+     mh, 4
+)
+
+m2 <- predict_cca(get_patterns(ccsm_recent['prec'], k = 4),
+              get_patterns(obs['prec'], k = 4),
+     ccsm_recent['prec'], 4
+)
+
+m3 <- predict_cca(get_patterns(era_pr, k = 4),
+              get_patterns(obs['prec'], k = 4),
+     era_pr, 4
+)
+
+m4 <- predict_cca(get_patterns(era_pr, k = 4),
+              get_patterns(obs['prec'], k = 4),
+     mh, 4
+)
+
+m5 <- predict_cca(get_patterns(era_pr, k = 4),
+              get_patterns(obs['prec'], k = 4),
+     pi, 4
+)
+
+sqrt(mean(pull(m1 - obs['prec'])^2))
+sqrt(mean(pull(m2 - obs['prec'])^2))
+sqrt(mean(pull(m3 - obs['prec'])^2))
+sqrt(mean(pull(m4 - obs['prec'])^2))
+
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = m3 - obs['prec']) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-86, 86))  +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = st_apply(m3, 1:2, sum)) +
+  coord_quickmap() +
+  scale_fill_viridis_c(limits = c(0, 4000))
+ggplot() +
+  geom_stars(data = st_apply(m4, 1:2, sum)) +
+  coord_quickmap() +
+  scale_fill_viridis_c(limits = c(0, 4000))
+ggplot() +
+  geom_stars(data = st_apply(m1, 1:2, sum)) +
+  coord_quickmap() +
+  scale_fill_viridis_c(limits = c(0, 4000))
+ggplot() +
+  geom_stars(data = st_apply(m2, 1:2, sum)) +
+  coord_quickmap() +
+  scale_fill_viridis_c(limits = c(0, 4000))
+```
+
+```{r}
+ggplot() + geom_stars(data = ccsm_recent['prec'] - mh) + facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-25, 25))
+```
+```{r}
+ggplot() + geom_stars(data = drop_units(ccsm_recent['prec']) - drop_units(era_pr)) + facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-150, 150))
+```
+```{r}
+ggplot() + geom_stars(data = m4 - m3) + facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-110, 110), direction = 1) +
+  ggtitle('era model difference to mh')
+ggplot() + geom_stars(data = m5 - m3) + facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-110, 110), direction = 1) +
+  ggtitle('era model difference to pi')
+ggplot() + geom_stars(data = m5 - m4) + facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-110, 110), direction = 1) +
+  ggtitle('era model difference to pi mh')
+```
+
+```{r}
+
+
+# these ask whether having each predictor different changes things
+m3 <- predict_cca(get_patterns(pi, k = 4),
+              get_patterns(prec_obs, k = 4),
+     pi, 4
+)
+
+m4 <- predict_cca(get_patterns(recent, k = 4),
+              get_patterns(prec_obs, k = 4),
+     recent, 4
+)
+
+m5 <- (units::drop_units(recent) - st_apply(recent, 1:2, mean)) %>%
+  st_warp(prec_obs, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('PRECT')%>% 
+ # mutate(PRECT = units::set_units(PRECT, mm/month)) %>%
+  `+`(st_apply(prec_obs, 1:2, mean))
+
+sqrt(mean(pull(m1 - prec_obs)^2))
+sqrt(mean(pull(m2 - prec_obs)^2))
+sqrt(mean(pull(m3 - prec_obs)^2))
+sqrt(mean(pull(m4 - prec_obs)^2))
+sqrt(mean(pull(m5 - units::drop_units(prec_obs))^2))
+
+plot(m6 - prec_obs)
+plot(prec_obs[,,,1]);plot(m6[,,,1])
+ggplot() +
+  geom_stars(data = m3 - prec_obs) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-91, 91))  +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = m4 - prec_obs) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-91, 91))  +
+  coord_quickmap()
+```
+
+```{r}
+t1$amplitudes %>%
+  mutate(month = as.numeric(factor(time, levels = month.name))) %>%
+ggplot(aes(month, amplitude)) +
+    geom_point() +
+  geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc')) +
+    facet_wrap(~PC) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+    theme_bw()
+```
+
+```{r}
+plot_scree(t1$eigenvalues, k = 4)
+```
+```{r}
+plot_eofs <- function(patterns, palette = 'vik', scaled = TRUE){
+  if(scaled){
+    ggplot(patterns$eofs_corr) +
+      geom_raster(aes(x, y, fill = correlation)) +
+      geom_sf(data = states_wus, fill = NA, color = 'black') +
+      facet_wrap(~paste0('EOF', PC)) +
+      scale_fill_scico(palette = palette, direction = -1, limits = c(-1, 1)) +
+      theme_void()+
+      ggtitle('Observed March SWE EOFS')
+  } else {
+    max_weight <- max(abs(patterns$eofs$weight))
+    ggplot(patterns$eofs) +
+      geom_raster(aes(x, y, fill = weight)) +
+      geom_sf(data = states_wus, fill = NA, color = 'black') +
+      facet_wrap(~paste0('EOF', EOF)) +
+      scale_fill_scico(palette = palette, direction = -1, limits = c(-1, 1) * max_weight) +
+      theme_void()+
+      ggtitle('Observed March SWE EOFS')
+  }
+}
+
+t1$eofs %>%    ggplot(patterns$eofs_corr) +
+      geom_raster(aes(x, y, fill = correlation)) +
+      geom_sf(data = states_wus, fill = NA, color = 'black') +
+      facet_wrap(~paste0('EOF', PC)) +
+      scale_fill_scico(palette = palette, direction = -1, limits = c(-1, 1)) +
+      theme_void()+
+      ggtitle('Observed March SWE EOFS')
+
+plot_eofs(t1, scaled = FALSE) +
+  geom_raster(aes(x = x, y = y, fill = value)) +
+  coord_sf(xlim =  c(-10, 45)) +
+    scale_fill_viridis_c(option = 'magma', limits = c(-0.15, 0.15) )
+
+
+
+ggplot() +
+  geom_stars(data = t1$eofs) +
+  facet_wrap(~PC) +
+  scale_fill_viridis_c(option = 'magma', limits = c(-max(abs(t1$eofs$X)), max(abs(t1$eofs$X)))) +
+  theme_bw()
+```
+
+```{r}
+ecmwf_ref <- brick('data/ERAinterim_prec.nc', var ='cp')[[1]] %>%
+  rotate %>%
+  crop(bbox, snap = 'out') %>%
+  disaggregate(fact = 15, method = 'bilinear')
+
+
+  # why is this a read failure?
+t2 <- prec_obs %>% st_as_stars()
+
+plot(prec_obs)
+```
+
+
+## monthly
+Now repeat it for monthly values
+
+```{r}
+ecmwf_cp_mon <- brick('data/ERAinterim_prec.nc', var ='cp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out') %>%
+  disaggregate(fact = 4, method = 'bilinear')
+
+ecmwf_lsp_mon <- brick('data/ERAinterim_prec.nc', var ='lsp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out') %>%
+  disaggregate(fact = 4, method = 'bilinear')
+
+era_pr_mon <- st_as_stars(ecmwf_cp_mon + ecmwf_lsp_mon) %>%
+ # st_set_dimensions('band', values = getZ(ecmwf_cp_mon) %>% zoo::as.yearmon() %>% as.numeric(), names = 'time') %>%
+  st_set_dimensions('band', values = 1:468, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m))
+```
+
+
+```{r}
+ get_pcs(era_pr_mon) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+era_patterns_mon <- get_patterns(era_pr_mon, k = 5)
+```
+
+
+```{r}
+plot_amps(era_patterns_mon)
+```
+```{r}
+### cwould be good to plot seasonal cycle ober the months, so a seasonal cycle line per each year
+era_patterns_mon$amplitudes %>%
+    mutate(year = time %/% 12) %>%
+   group_by(year) %>%
+  mutate(month = 1:n())
+  pivot_longer(-time) %>%
+  ggplot(aes(time, value)) +
+  geom_point() +
+  facet_wrap(~name)
+```
+
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(era_pr, era_patterns)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(era_pr_mon, era_patterns_mon)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(era_pr_mon, era_patterns_mon)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
+
+## test
+so now upsample the monthlies?
+```{r}
+era_coarse <- era_pr_mon %>% 
+  as('Raster') %>%
+  aggregate(fact = 8, method = 'bilinear') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:468, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m))
+
+new_clim <- stackApply(filter(era_pr_mon, time > 240) %>% as('Raster'), indices = 1:12, fun = mean) %>% st_as_stars() %>% st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m))
+
+new_clim2 <-  stackApply(filter(era_pr_mon, time <= 240) %>% as('Raster'), indices = 1:12, fun = mean) %>% st_as_stars() %>% st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m))
+
+new_clim_coarse <- stackApply(filter(era_coarse, time > 240) %>% as('Raster'), indices = 1:12, fun = mean) %>% st_as_stars() %>% st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m))
+
+t1 <- predict_cca(get_patterns(filter(era_coarse, time <= 240), k = 5),
+            get_patterns(filter(era_pr_mon, time <= 240), k = 4),
+      filter(era_coarse, time > 240), 4
+) %>% as('Raster') %>% stackApply(indices = 1:12, fun = mean) %>% st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') 
+
+t2 <- predict_cca(get_patterns(filter(era_coarse, time <= 240), k = 5),
+            get_patterns(filter(era_pr_mon, time <= 240), k = 4),
+     new_clim_coarse, 4
+) 
+t3 <- predict_cca(get_patterns(filter(era_coarse, time <= 240) %>% as('Raster') %>% stackApply(indices = 1:12, fun = mean) %>% st_as_stars() %>% st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m)), k = 5),
+            get_patterns(filter(era_pr_mon, time <= 240) %>% as('Raster') %>% stackApply(indices = 1:12, fun = mean) %>% st_as_stars() %>% st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip') %>%
+  mutate(precip = units::set_units(precip, m)), k = 4),
+     new_clim_coarse, 4
+) 
+
+plot(t1);plot(t2);plot(t3)
+```
+
+```{r}
+as_tibble(t1 - units::drop_units(new_clim)) %>%
+#  group_by(time) %>%
+  summarise(sqrt(mean(index_1^2)) * 1000)
+
+as_tibble(units::drop_units(t2) - units::drop_units(new_clim)) %>%
+ # group_by(time) %>%
+  summarise(sqrt(mean(precip^2)) * 1000)
+
+as_tibble(units::drop_units(t3) - units::drop_units(new_clim)) %>%
+ # group_by(time) %>%
+  summarise(sqrt(mean(precip^2)) * 1000)
+
+plot(new_clim - new_clim2)
+```
+```{r}
+ggplot() +
+  geom_stars(data = t1- units::drop_units(new_clim)) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-.003, .003))
+```
+## ccsm
+
+```{r}
+ccsm <- brick('/Volumes/Data/GCM/b40.20th.track1.1deg.005.cam2.h0.PRECT.185001-200512.nc') %>%
+   rotate() %>%
+  crop(bbox, snap = 'out')
+
+recent <- ccsm[[1465:1872]] %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
+
+past <- ccsm[[1:360]] %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
+
+ggplot() +
+  geom_stars(data = recent) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c() +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = past) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c() +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = recent - past) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+```
+
+```{r}
+ get_pcs(recent) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+
+get_pcs(past) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(recent, get_patterns(recent))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = get_correlation(past, get_patterns(past))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
+try a naive cca on just the climatology
+
+```{r}
+past_fine <- past %>% 
+  as('Raster') %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip')  %>%
+   mutate(precip = units::set_units(precip, mm/month))
+
+present_fine <- recent %>% 
+  as('Raster') %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip')%>%
+    mutate(precip = units::set_units(precip, mm/month))
+
+
+t4 <- predict_cca(get_patterns(recent, k = 4),
+            get_patterns(present_fine, k = 4),
+     past, 4
+)
+
+ggplot() +
+  geom_stars(data = t4) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = past) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = past_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = t4 - past_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-85, 85)) +
+  coord_quickmap()
+```
+
+Those were the results for just the climatology. How do the months work?
+
+```{r}
+recent_mon <- ccsm[[1465:1872]] %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:408, names = 'time') %>%  
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
+
+past_mon <- ccsm[[1:360]] %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:360, names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
+```
+
+```{r}
+get_pcs(recent_mon) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+
+get_pcs(past_mon) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+past_fine_mon <- past_mon %>% 
+  as('Raster') %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:360, names = 'time') %>%
+  setNames('precip')  %>%
+   mutate(precip = units::set_units(precip, mm/month))
+
+present_fine_mon <- recent_mon %>% 
+  as('Raster') %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:408, names = 'time') %>%
+  setNames('precip')%>%
+    mutate(precip = units::set_units(precip, mm/month))
+
+
+t5 <- predict_cca(get_patterns(recent_mon, k = 4),
+            get_patterns(present_fine_mon, k = 4),
+     past_mon, 4
+)
+
+ggplot() +
+  geom_stars(data = as(t5, 'Raster') %>% stackApply(1:12, mean) %>% st_as_stars()) +
+  facet_wrap(~band) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = as(past_mon, 'Raster') %>% stackApply(1:12, mean) %>% st_as_stars()) +
+  facet_wrap(~band) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+    geom_stars(data = as(past_fine, 'Raster') %>% stackApply(1:12, mean) %>% st_as_stars()) +
+  facet_wrap(~band) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = as(t5 - past_fine, 'Raster') %>% stackApply(1:12, mean) %>% st_as_stars()) +
+  facet_wrap(~band) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-70, 70)) +
+  coord_quickmap()
+```
+
+so this says the pca on monthly is about the same, if a little worse, than the pca on the climatology!
+```{r}
+as_tibble(t5 - past_fine_mon) %>%
+#  group_by(time) %>%
+  summarise(sqrt(mean(precip^2)))
+
+as_tibble(t4 - past_fine) %>%
+#  group_by(time) %>%
+  summarise(sqrt(mean(precip^2)))
+
+as(t5, 'Raster') %>% stackApply(1:12, mean) %>% st_as_stars() %>% setNames('precip') %>%
+  st_set_dimensions('band', names = 'time') %>%
+  `-`(units::drop_units(past_fine)) %>%
+  as_tibble() %>%
+#  group_by(time) %>%
+  summarise(sqrt(mean(precip^2)))
+```
+##
+
+well that went well. now try the mid holocene
+
+
+
+```{r}
+ggplot() +
+  geom_stars(data = mh - pi) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-20, 20)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = m1 - prec_obs) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-91, 91))  +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = m2 - prec_obs) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-91, 91))  +
+  coord_quickmap()
+
+```
+```{r}
+plot_amps(get_patterns(recent))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+plot_amps(get_patterns(pi)) +scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+plot_amps(get_patterns(mh)) +scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+plot_amps(get_patterns(prec_obs))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+plot_amps(get_patterns(era_pr))+scale_y_continuous(limits = c(-2.3, 2.3)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+
+
+
+```
+
+
+```{r}
+get_pcs(pi) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+
+```{r}
+t6 <- predict_cca(get_patterns(recent, k = 4),
+            get_patterns(present_fine, k = 4),
+     mh, 4
+)
+
+mh_fine <- mh %>% 
+  as('Raster') %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip')  %>%
+   mutate(precip = units::set_units(precip, mm/month))
+
+ggplot() +
+  geom_stars(data = t6) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = mh) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = mh_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = t6 - mh_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-50, 50)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = present_fine - mh_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-50, 50)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = present_fine - t6) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-50, 50)) +
+  coord_quickmap()
+```
+
+```{r}
+as_tibble(t6 - mh_fine) %>%
+#  group_by(time) %>%
+  summarise(sqrt(mean(precip^2)))
+```
+
+Worked pretty well! but then how does the monthly perform?
+
+
+```{r}
+#need mid holocene monthly
+mh_mon <- brick('/Volumes/Data/GCM/b40.mh6ka.1deg.003.cam2.h0.PRECT.080101-131612.nc', var = 'PRECT') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
+
+mh_fine_mon <- mh_mon %>% 
+  as('Raster') %>%
+  stackApply(1:12, mean) %>%
+  disaggregate(fact = 5, method = 'bilinear') %>% 
+  st_as_stars() %>%
+ st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('precip')  %>%
+   mutate(precip = units::set_units(precip, mm/month))
+```
+
+```{r}
+get_pcs(mh_mon) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+t7 <- predict_cca(get_patterns(recent_mon, k = 6),
+            get_patterns(present_fine_mon, k = 6),
+     mh, 6
+)
+
+
+ggplot() +
+  geom_stars(data = t7 - mh_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-35, 35)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = t6 - mh_fine) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-35, 35)) +
+  coord_quickmap()
+```
+So again it looks like the climatology approach performs the same as, and even slightly better than, the monthly approach.
+```{r}
+as_tibble(t7 - mh_fine)%>%
+  summarise(sqrt(mean(precip^2)))
+
+as_tibble(t6 - mh_fine) %>%
+  summarise(sqrt(mean(precip^2)))
+```
+
+##
+so all of the above has shown that we can just do the eofs of the monthly cycle!
+```{r}
+get_pcs(mh) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+#unrotated
+ggplot() +
+  geom_stars(data = get_correlation(past, get_patterns(mh, k = 5))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+#rotated
+ggplot() +
+  geom_stars(data = get_correlation(past, get_patterns(mh, k = 5, rotate = TRUE))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+#rscaled
+ggplot() +
+  geom_stars(data = get_correlation(past, get_patterns(mh, k = 5, scale = TRUE))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+```
+```{r}
+# comparing pi ccsm patterns with observations
+ggplot() +
+  geom_stars(data = get_correlation(pi, get_patterns(pi, k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(pi, k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+
+
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(prec_obs, k = 4))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  coord_quickmap()
+```
+
+## obsevations
+
+```{r}
+
+
+ggplot() +
+  geom_stars(data = prec_obs) +
+  scale_fill_viridis_c(option = 'viridis')+
+  facet_wrap(~time) +
+    coord_quickmap()
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(prec_obs, 1:2, mean)) +
+  scale_fill_viridis_c(option = 'viridis')+
+    coord_quickmap()
+```
+
+```{r}
+get_pcs(prec_obs) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(prec_obs))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(prec_obs, rotate = TRUE))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+  
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(prec_obs, scale = TRUE))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = get_correlation(prec_obs, get_patterns(prec_obs, rotate = TRUE, scale = TRUE))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
+
+```{r}
+plot_amps(get_patterns(prec_obs)) + scale_y_continuous(limits = c(-2.1, 2.1))
+plot_amps(get_patterns(era_pr))+ scale_y_continuous(limits = c(-2.1, 2.1))
+```
+```{r}
+cor(obs_patterns$amplitudes, get_patterns(era_pr)$amplitudes)
+```
+
+### temp
+
+```{r}
+
+ggplot() +
+  geom_stars(data = tmin_obs) +
+  scale_fill_viridis_c(option = 'magma')+
+  facet_wrap(~time) +
+    coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(tmin_obs, 1:2, mean)) +
+  scale_fill_viridis_c(option = 'magma')+
+    coord_quickmap()
+```
+
+```{r}
+tmin_patterns <- get_patterns(tmin_obs, k = 2)
+get_pcs(tmin_obs) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(tmin_obs, tmin_patterns)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
+
+```{r}
+plot_amps(tmin_patterns) + scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12))
+```
+## tmax
+
+```{r}
+
+
+ggplot() +
+  geom_stars(data = tmax_obs) +
+  scale_fill_viridis_c(option = 'magma')+
+  facet_wrap(~time) +
+    coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(tmax_obs, 1:2, mean)) +
+  scale_fill_viridis_c(option = 'magma')+
+    coord_quickmap()
+```
+
+```{r}
+tmax_patterns <- get_patterns(tmax_obs, k = 4, scale = TRUE)
+get_pcs(tmax_obs, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(tmax_obs, tmax_patterns)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
+```{r}
+plot_amps(tmax_patterns) + scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12))
+```
+
+## do these temperature patterns prevail in the mid holocene too?
+```{r}
+mh_tmin <- brick('/Volumes/Data/Data/PMIP3 Data/MH/tasmin/tasmin_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'tasmin') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('tasmin')%>% 
+  mutate(tasmin = units::set_units(tasmin, K)) %>%
+  mutate(tasmin = units::set_units(tasmin, degree_C))
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = mh_tmin) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option  = 'magma') +
+  coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(mh_tmin, 1:2, mean)) +
+  scale_fill_viridis_c(option  = 'magma') +
+  coord_quickmap()
+```
+```{r}
+get_pcs(mh_tmin) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(mh_tmin, get_patterns(mh_tmin))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+```{r}
+plot_amps(get_patterns(mh_tmin))+ scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+plot_amps(get_patterns(tmin_obs))+ scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12))+ scale_x_continuous(breaks = 1:12)
+
+```
+now tmax
+
+
+```{r}
+mh_tmax <- brick('/Volumes/Data/Data/PMIP3 Data/MH/tasmax/tasmax_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'tasmax') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('tasmax')%>% 
+  mutate(tasmax = units::set_units(tasmax, K)) %>%
+  mutate(tasmax = units::set_units(tasmax, degree_C))
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = mh_tmax) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(option  = 'magma') +
+  coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(mh_tmax, 1:2, mean)) +
+  scale_fill_viridis_c(option  = 'magma') +
+  coord_quickmap()
+```
+```{r}
+get_pcs(mh_tmax) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(mh_tmax, get_patterns(mh_tmax))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
+```{r}
+plot_amps(get_patterns(mh_tmax))+ scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12)) + scale_x_continuous(breaks = 1:12)
+plot_amps(get_patterns(tmax_obs))+ scale_y_continuous(limits = c(-2.1, 2.1)) + geom_smooth(method = 'gam', formula = y ~ s(x, bs = 'cc', k = 12))+ scale_x_continuous(breaks = 1:12)
+
+```
+how do all these compare to previous work?
+```{r}
+old_tmx <- read_stars('~/Downloads/ccsm4_tmx_mh6k.tif') %>%
+  st_set_dimensions('band', names = 'time') %>%
+  setNames('tmax') %>%
+  mutate(tmax = units::set_units(tmax, degree_C))
+```
+
+```{r}
+get_pcs(old_tmx) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+ggplot() +
+  geom_stars(data = get_correlation(old_tmx, get_patterns(old_tmx))) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1), na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
+
+#######
+
+```{r}
+get_corrs2(test %>% mutate(value = SWE) %>% select(-SWE), t1) %>%
+  pivot_longer(-c(x,y)) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #      geom_sf(data = states_wus, fill = NA, color = 'black', alpha = .5) +
+  facet_wrap(~name) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+
+get_corrs2(dat %>% mutate(value = SWE) %>% select(-SWE), t2) %>%
+  pivot_longer(-c(x,y)) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #      geom_sf(data = states_wus, fill = NA, color = 'black', alpha = .5) +
+  facet_wrap(~name) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+```
+```{r}
+get_climatology
+```
+
+
+```{r}
+dat <- ccsm %>% as.data.frame()
+
+
+#there must be someway to aggregate along months in stars!
+ read_ncdf('/Volumes/Data/GCM/b40.20th.track1.1deg.005.cam2.h0.PRECT.185001-200512.nc', var = 'PRECT') %>%
+   st_crop(st_bbox(bbox, crs = 4326)) %>%
+   aggregate('time', mean) %>%
+   st_get_dimension_values('time') %>%
+   as.Mon
+```
+
+```{r}
+climatology <-get_climatology(ccsm)
+
+ggplot() +
+  geom_stars(data = climatology['sd']) +
+  scale_fill_viridis_c(option = 'magma') +
+  coord_quickmap() +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = climatology['mean']) +
+  scale_fill_viridis_c(option = 'magma') +
+  coord_quickmap() +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = (ccsm - climatology['mean'])) +
+  facet_wrap(~month) +
+  scale_fill_viridis_c(option = 'magma') +
+  coord_quickmap() +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = (ccsm - climatology['mean']) / climatology['sd']) +
+  facet_wrap(~month) +
+  scale_fill_viridis_c(option = 'magma') +
+  coord_quickmap() +
+  theme_bw()
+```
+
+```{r}
+
+plot(st_area(ccsm))
+
+as.data.frame(split(ccsm, 'month'))[,-(1:2)] %>%
+    #  dplyr::select(-x, -y) %>%
+    t() %>%
+    prcomp(center = FALSE)
+as.data.frame(ccsm) %>% 
+  pivot_wider(id_cols = c(x, y), names_from)
+
+
+
+# this does standardization and area weighting
+pcs <- (((ccsm - climatology['mean']) / climatology['sd']) * sqrt(cos(st_dim_to_attr(ccsm, which = 2) * pi / 180))) %>% split('month') %>%
+  as.data.frame() %>%
+  select(-c(x,y)) %>%
+  t() %>%
+  prcomp(center = FALSE)
+
+eigenvalues <- get_eigenvalues(pcs)
+eigenvalues %>%
+  plot_scree(k = 4, kmax = 10) +
+  scale_color_brewer(palette = 'Spectral')
+
+  eofs <- get_eofs(dat, pca, k, eigenvalues, rotate)
+  
+  
+  pcs %>%
+    broom::tidy(matrix = 'variables') %>%
+    filter(PC <= 4) %>%
+    left_join(eigenvalues[1:2], by = 'PC') %>%
+    mutate(weight = value * std.dev, # scale by stdev (i.e. sqrt(eigenvalues)) for more robust rotation (Hannachi et al 2007)
+           EOF = as.character(PC),
+           column = as.character(column)) %>%
+    dplyr::select(-c(std.dev, PC))
+  
+  dat %>%
+    spread(year, SWE) %>%
+    mutate(column = as.character(1:n())) %>%
+    dplyr::select(x, y, column) %>%
+    full_join(eofs, by = 'column') %>%
+    dplyr::select(-column)
+  
+  
+  
+  ccsm %>% split('month') %>% as.data.frame() %>% mutate(column = as.character(1:n()))
+
+  
+ st_as_stars(list(test = pcs$rotation), dimensions = st_dimensions(st_area((ccsm))))
+ 
+ ccsm
+ 
+ pcs$rotation)
+ st_coordinates(ccsm)
+ t3 <- st_area(ccsm)
+ t3$test <- pcs$rotation
+ st_as_stars(list)
+ ccsm %>% split(1) %>% split(2)
+ 
+ # this makes each raster cell a unique point, could get indices from this then split?
+ ccsm %>% st_xy2sfc(as_points = TRUE)
+ 
+ st_coordinates(ccsm)
+ 
+ initialize(ccsm)
+ 
+ 
+ dim(pcs$rotation)
+ st_as_stars(pcs$rotation, dimensions = st_dimensions(st_area(ccsm)))
+ class(pcs$rotation)
+ 
+ st_area(ccsm) %>% bind_cols(pcs$rotation)
+ 
+ ccsm_star <- ccsm %>%
+   st_area() %>%
+   as.data.frame() %>%
+   bind_cols(as_tibble(pcs$rotation)) %>%
+   select(-area) %>%
+   st_as_stars() %>%
+   merge(name = 'PC') %>%
+   slice('PC', 1:4)
+ 
+ pcs$rotation
+   
+  dat %>%
+    spread(year, SWE) %>%
+    mutate(column = as.character(1:n())) %>%
+    dplyr::select(x, y, column) %>%
+    full_join(eofs, by = 'column') %>%
+    dplyr::select(-column)
+  ccsm %>% left_join
+  
+
+ 
+ ccsm2 <- ccsm
+ccsm2[[1]] <- ccsm[[1]]
+dims(ccsm)
+
+simplify2array(pcs$rotation) %>% class
+ccsm[[1]] %>% dim
+
+climatology %>% 
+  transmute(test = pcs$rotation[,1]) %>% plot
+
+
+
+clim <- climatology
+clim$test <- pcs$rotation[,1]
+
+clim[1:2,,] <- pcs$rotation[,1:2]
+
+st_dimensions()
+
+
+ccsm %>%
+  st_xy2sfc(as_points = TRUE) %>%
+  st_dimensions() %>%
+  st_as_stars(pcs$rotation, dimensions = .) %>% plot(max.plot = 12)
+  
+  
+  climatology %>%
+    st_xy2sfc(as_points = TRUE) %>%
+    st_as_sf %>%
+    bind_cols(pcs$rotation) %>%
+    st_as_stars %>%
+    st_sfc2xy() %>%
+    select(-mean, -sd) %>% plot
+```
+```{r}
+ ggplot() +
+   geom_stars(data = ccsm_star) +
+     facet_wrap(~PC) +
+  scale_fill_viridis_c(option = 'magma', limits = c(-0.15, 0.15)) +
+  coord_quickmap() +
+  theme_bw()
+
+plot_eofs(t1, scaled = FALSE) +
+  geom_raster(aes(x = x, y = y, fill = value)) +
+  coord_sf(xlim =  c(-10, 45)) +
+    scale_fill_viridis_c(option = 'magma', limits = c(-0.15, 0.15) )
+plot_eofs(t2, scaled = FALSE) +
+  geom_raster(aes(x = x, y = y, fill = value)) +
+  coord_sf(xlim =  c(-10, 45)) +
+    scale_fill_viridis_c(option = 'magma', limits = c(-0.15, 0.15) )
+```
+
+```{r}
+get_patterns(ccsm)
+
+```
+
+
+```{r}
+ccsm[,,,1] %>%
+  as_tibble() %>%
+  spread(month, PRECT) %>%
+  mutate(column = as.character(1:n())) %>%
+  dplyr::select(x, y, column) %>%
+  full_join(eofs, by = 'column') %>%
+  dplyr::select(-column)
+  
+ ccsm_star <- ccsm %>%
+   st_area() %>%
+   as.data.frame() %>%
+   bind_cols(as_tibble(pcs$rotation)) %>%
+   select(-area) %>%
+   st_as_stars() %>%
+   merge(name = 'PC') %>%
+   slice('PC', 1:k)
+ 
+    eofs
+    st_coordinates(ccsm[,,,1]) %>%
+      dplyr::select(x, y) %>%
+      rownames_to_column('column') %>%
+      full_join(eofs, by = 'column') %>%
+      dplyr::select(-column) %>%
+      st_as_stars()
+    
+pcs$sdev
+pcs$rotation * (pcs$sdev ^ 2)
+varimax(pcs$rotation)
+pcs$sdev
+wql::eof
+
+eofs %>% # varimax rotation
+        dplyr::select(-value) %>% # rotate on the weights
+        pivot_wider(names_from = EOF, values_from = weight) %>%
+        column_to_rownames(var = 'column') %>%
+        as.matrix() %>%
+        varimax()
+```
+
+```{r}
+pcs$rotation[[1]] * (pcs$sdev ^ 2)[[1]]
+pcs$rotation[[1,2]] * (pcs$sdev ^ 2)[[2]]
+```
+
+```{r}
+t(pcs$rotation) * pcs$sdev^2
+  pr1[["rotation"]][, 1:n]
+varimax(pcs$rotation[, 1:4] %*% diag(pcs$sdev, 4, 4))$loadings %>% unclass %>% 
+  `colnames<-`(paste0('PC', 1:4)) %>% 
+  as_tibble
+```
+
