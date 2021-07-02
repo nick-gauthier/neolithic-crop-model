@@ -1,0 +1,246 @@
+---
+title: "EOF downscaling of Mid Holocene climate"
+author: "Nick Gauthier"
+date: "3/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(raster)
+library(tidyverse)
+library(zoo)
+library(stars)
+library(units)
+library(tidyEOF)
+sf_use_s2(FALSE)
+```
+
+
+# Setup
+
+Setup the bounding box and a reference 5' raster for reprojection.
+
+```{r}
+bbox <- extent(c(-10, 45, 30, 50))
+
+ref <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 0.0833333)
+ref_sim <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 1)
+
+coast <- rnaturalearth::ne_coastline(scale = 'medium', returnclass = 'sf') %>% 
+  st_crop(ref)
+countries <- rnaturalearth::ne_countries(scale = 'large', returnclass = 'sf') %>% 
+  st_crop(ref)
+```
+
+Import the observational data.
+warping it directly looses the unit conversion info from the geotiff file!
+```{r}
+era_land <- read_stars('/Volumes/Data/GCM//adaptor.mars.internal-1622741123.0372913-20427-10-9fe07582-7b92-49f5-83ea-f5e620542b4b.nc') %>% 
+st_set_crs(4326) %>%
+  .['tp'] %>%
+  .[,-1,,1:444] %>%
+ # as('Raster') %>%
+ # stackApply(1:12, mean) %>%
+ # st_as_stars() %>%
+  #st_set_dimensions('band', values = getZ(brick('~/Downloads/adaptor.mars.internal-1622741123.0372913-20427-10-9fe07582-7b92-49f5-83ea-f5e620542b4b.nc')[[-c()]]), names = 'time') %>%
+st_set_dimensions(., 'time', values = as.numeric(zoo::as.yearmon(st_get_dimension_values(., 'time')))) %>%
+  setNames('prec') %>%
+  mutate(prec = set_units(prec * 30, mm))
+
+ggplot() +
+  geom_stars(data = era_land) +
+  coord_quickmap() +facet_wrap(~time) +
+  scale_fill_viridis_c(na.value = NA)
+```
+
+```{r}
+ get_pcs(era_land) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+now squareroot
+```{r}
+ get_pcs(era_land, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+era_patterns_land <- get_patterns(era_land, k = 8)
+
+ggplot() +
+  geom_stars(data = get_correlation(era_land, era_patterns_land)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA) +
+  #scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void()
+```
+```{r}
+era_patterns_land_r <- get_patterns(era_land, k = 7, rotate = TRUE)
+
+ggplot() +
+  geom_stars(data = get_correlation(era_land, era_patterns_land_r)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA) +
+  #scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void()
+```
+
+```{r}
+era_patterns_land_s <- get_patterns(era_land, k = 7, scale = TRUE)
+
+ggplot() +
+  geom_stars(data = get_correlation(era_land, era_patterns_land_s)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA) +
+  #scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void()
+```
+
+
+```{r}
+era_patterns_land_rs <- get_patterns(era_land, k = 7, rotate = TRUE, scale = TRUE)
+
+ggplot() +
+  geom_stars(data = get_correlation(era_land, era_patterns_land_rs)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA) +
+  #scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void()
+```
+
+```{r}
+plot_amps(era_patterns_land_rs)
+```
+
+#seasonal decomp
+```{r}
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC1 ~ s(time) + s(month, bs = 'cc'), data = .)  %>%
+  plot
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC1 ~ te(time, month, bs = c('cr','cc')), data = .)  %>%
+  plot(scheme= 1)
+```
+
+```{r}
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC3 ~ s(time) + s(month, bs = 'cc', k = 12), data = .)  %>%
+  plot
+```
+```{r}
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC5 ~ s(time) + s(month, bs = 'cc'), data = .)  %>%
+  plot
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC5 ~ te(time, month, bs = c('cr','cc')), data = .)  %>%
+  plot(scheme= 1)
+```
+
+```{r}
+era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gam(PC5 ~ te(time, month, bs = c('cr','cc')), data = .)  %>%
+  plot(scheme= 1)
+```
+
+autocorrelation at lag 12
+```{r}
+m1 <- era_patterns_land_rs$amplitudes %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name))) %>%
+  mgcv::gamm(PC1 ~ te(time, month, bs = c('cr','cc')), data = .) 
+
+layout(matrix(1:2, ncol = 2))
+ acf(resid(m1$lme), lag.max = 36, main = "ACF")
+ pacf(resid(m1$lme), lag.max = 36, main = "pACF")
+ layout(1)
+```
+```{r}
+era_patterns_land_rs$amplitudes %>%
+  pivot_longer(-time) %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name)),
+         year = as.numeric(floor(as.yearmon(time)))) %>%
+  ggplot(aes(month,value,color = name)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_line(alpha = .1, aes(group = year)) +
+  facet_wrap(~name, scales = 'free_y') +
+    geom_smooth(formula = y ~  s(x, bs = 'cc', k = 12), method = 'gam') +
+  scale_x_continuous(breaks = 1:12) +
+  theme_bw()
+```
+
+```{r}
+era_land_t <- read_stars('/Volumes/Data/GCM/adaptor.mars.internal-1622741123.0372913-20427-10-9fe07582-7b92-49f5-83ea-f5e620542b4b.nc') %>% 
+st_set_crs(4326) %>%
+  .['t2m'] %>%
+  .[,-1,,1:444] %>%
+st_set_dimensions(., 'time', values = as.numeric(zoo::as.yearmon(st_get_dimension_values(., 'time')))) %>%
+  setNames('t2m') %>%
+  mutate(t2m = set_units(t2m, K))
+```
+
+```{r}
+ get_pcs(era_land_t, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+plot(era_land_t[,,,1:24])
+```
+```{r}
+era_t2m <- get_patterns(era_land_t, k = 3, rotate = TRUE)
+
+ggplot() +
+  geom_stars(data = get_correlation(era_land_t, era_t2m)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-1, 1)) +
+  #scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void()
+```
+```{r}
+plot_amps(era_t2m) + facet_wrap(~PC, nrow = 3)
+```
+```{r}
+era_t2m$amplitudes %>%
+  pivot_longer(-time) %>%
+  mutate(month = as.numeric(factor(months(as.yearmon(time)), levels = month.name)),
+         year = as.numeric(floor(as.yearmon(time)))) %>%
+  ggplot(aes(month,value,color = year)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_line(alpha = .25, aes(group = year)) +
+  facet_wrap(~name, scales = 'free_y') +
+  scale_color_viridis_c() +
+  geom_smooth(formula = y ~  s(x, bs = 'cc', k = 12), color = 'black', method = 'gam') +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  theme_bw()
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(era_land_t, 1:2, mean)) +
+  scale_fill_viridis_c(option = 'magma', na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+```{r}
+ggplot() +
+  geom_stars(data = st_apply(era_land_t, 1:2, sd)) +
+  scale_fill_viridis_c(option = 'magma', na.value = NA) +
+  theme_bw() +
+  coord_quickmap()
+```
+
