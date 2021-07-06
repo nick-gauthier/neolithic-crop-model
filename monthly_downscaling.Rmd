@@ -104,7 +104,7 @@ ggplot() +
 
 
 ```{r}
-era_patterns_land_rs <- get_patterns(era_land, k = 7, rotate = TRUE, scale = TRUE)
+era_patterns_land_rs <- get_patterns(era_land, k = 9, rotate = TRUE, scale = TRUE)
 
 ggplot() +
   geom_stars(data = get_correlation(era_land, era_patterns_land_rs)) +
@@ -244,3 +244,60 @@ ggplot() +
   coord_quickmap()
 ```
 
+## CCSM
+```{r}
+mh <- brick('/Volumes/Data/PMIP3/MH/pr/pr_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+      st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec') %>% 
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+```
+
+```{r}
+plot(mh)
+```
+## ERA
+```{r}
+ecmwf_cp_mon <- brick('data/ERAinterim_prec.nc', var ='cp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out')# %>%
+ # disaggregate(fact = 4, method = 'bilinear')
+
+ecmwf_lsp_mon <- brick('data/ERAinterim_prec.nc', var ='lsp') %>%
+  rotate %>%
+  crop(bbox, snap = 'out') #%>%
+  #disaggregate(fact = 4, method = 'bilinear')
+
+era_pr_mon <- st_as_stars(ecmwf_cp_mon + ecmwf_lsp_mon) %>%
+ # st_set_dimensions('band', values = getZ(ecmwf_cp_mon) %>% zoo::as.yearmon() %>% as.numeric(), names = 'time') %>%
+  st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = as.numeric(zoo::as.yearmon(getZ(brick('data/ERAinterim_prec.nc', var ='lsp')))), names = 'time') %>%
+  setNames('prec') %>%
+  mutate(prec = set_units(prec, m/day) %>% 
+           set_units(mm/month)) %>%
+  .[,,,25:468]
+```
+```{r}
+plot(era_pr_mon[,,,1:12])
+```
+
+```{r}
+ get_pcs(era_pr_mon, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+
+```{r}
+era_patterns_mon <- get_patterns(era_pr_mon, k = 9, rotate = TRUE, scale = TRUE)
+ggplot() +
+  geom_stars(data = get_correlation(era_pr_mon, era_patterns_mon)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
