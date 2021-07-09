@@ -250,12 +250,39 @@ mh <- brick('/Volumes/Data/PMIP3/MH/pr/pr_Aclim_CCSM4_midHolocene_r1i1p1_100001-
   raster::rotate() %>%
   raster::crop(bbox, snap = 'out') %>%
   st_as_stars() %>%
-      st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
   st_set_dimensions('band', values = 1:12, names = 'time') %>%
   setNames('prec') %>% 
   mutate(prec = units::set_units(prec, mm/s)) %>%
   mutate(prec = units::set_units(prec, mm/month))
 ```
+```{r}
+prec_ccsm <- brick('/Volumes/Data/GCM/pr_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>% # 34 years
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+ # stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  setNames('prec') %>%
+    st_set_dimensions('band', values = 1:408, names = 'time') %>%
+  mutate(prec = set_units(prec, mm/s) %>% set_units(mm/month))
+```
+
+```{r}
+ get_pcs(prec_ccsm, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+ get_pcs(era_pr_mon, scale = TRUE) %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 4, kmax = 20) +
+  scale_color_brewer(palette = 'Spectral')
+```
+```{r}
+
+```
+
 
 ```{r}
 plot(mh)
@@ -301,3 +328,101 @@ ggplot() +
   #scale_fill_viridis_c() +
   coord_quickmap()
 ```
+
+```{r}
+ccsm_patterns_mon <- get_patterns(prec_ccsm, k = 9, rotate = TRUE, scale = TRUE)
+ggplot() +
+  geom_stars(data = get_correlation(prec_ccsm, ccsm_patterns_mon)) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
+
+```{r}
+ccsm_patterns_mon$eofs;era_patterns_mon$eofs
+```
+
+```{r}
+congruence <- function(x, y) {
+  # could check that both have the save dimensions
+  t1 <- as_tibble(x$eofs) %>%
+    pivot_wider(names_from = PC, values_from = weight) %>%
+    select(-x, -y) %>%
+    remove_missing() # not ideal but . . .
+  
+  t2 <- as_tibble(y$eofs) %>%
+    pivot_wider(names_from = PC, values_from = weight) %>%
+    select(-x, -y) %>%
+    remove_missing()
+  
+  psych::factor.congruence(t1, t2) 
+}
+
+align <- function(x, y) {
+  t1 <- as_tibble(x$eofs) %>%
+    pivot_wider(names_from = PC, values_from = weight) %>%
+    select(-x, -y) %>%
+    remove_missing()
+  
+  t2 <- as_tibble(y$eofs) %>%
+    pivot_wider(names_from = PC, values_from = weight) %>%
+    select(-x, -y) %>%
+    remove_missing()
+  
+  vegan::procrustes(as.matrix(t1), as.matrix(t2), scale = FALSE)
+
+  #psych::factor.congruence(t1, t2) 
+}
+test <- align(ccsm_patterns_mon, era_patterns_mon)
+summary(test)
+test$rotation
+test$Yrot
+```
+
+```{r}
+era_patterns_mon$eofs[,,,c(2,6, 8, 7, 5, 3, 4, 9, 1)] %>% plot
+```
+
+
+```{r}
+congruence(ccsm_patterns_mon, era_patterns_mon) %>%
+    as_tibble(rownames = 'ref') %>%
+  pivot_longer(-ref) %>%
+  group_by(ref) %>%
+  arrange(-abs(value), .by_group = TRUE) %>%
+  mutate(fit = case_when(abs(value) >= 0.98 ~ 'Excellent',
+                         abs(value) >= 0.92 ~ 'Good',
+                         abs(value) >= 0.82 ~ 'Borderline',
+                         abs(value) >= 0.68 ~ 'Poor',
+                         TRUE ~ 'Terrible')) %>%
+  filter(abs(value) == max(abs(value)))
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = ccsm_patterns_mon$eofs) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+ggplot() +
+    geom_stars(data = era_patterns_mon$eofs[,,,c(2,6, 8, 7, 5, 3, 4, 9, 1)] %>%
+                 split %>% mutate(PC7 = PC7 * -1, PC1 = PC1 * -1) %>%
+                 merge(name = 'PC')) +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  #scale_fill_viridis_c() +
+  coord_quickmap()
+```
+
+```{r}
+#need mid holocene monthly
+mh_mon <- brick('/Volumes/Data/GCM/b40.mh6ka.1deg.003.cam2.h0.PRECT.080101-131612.nc', var = 'PRECT') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  st_set_dimensions('band', names = 'time') %>%
+  setNames('PRECT')%>% 
+  mutate(PRECT = units::set_units(PRECT, m/s)) %>%
+  mutate(PRECT = units::set_units(PRECT, mm/month))
