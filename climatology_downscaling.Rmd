@@ -1,0 +1,856 @@
+---
+title: "Climatology Downscaling"
+author: "Nick Gauthier"
+date: "7/14/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(raster)
+library(tidyverse)
+library(zoo)
+library(stars)
+library(units)
+library(tidyEOF)
+library(scico)
+sf_use_s2(FALSE)
+```
+
+
+# Setup
+
+Setup the bounding box and a reference 5' raster for reprojection.
+
+```{r}
+bbox <- extent(c(-10, 45, 30, 50))
+
+ref <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 0.0833333)
+ref_sim <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 1)
+
+coast <- rnaturalearth::ne_coastline(scale = 'medium', returnclass = 'sf') %>% 
+  st_crop(ref)
+countries <- rnaturalearth::ne_countries(scale = 'large', returnclass = 'sf') %>% 
+  st_crop(ref)
+```
+
+Observations
+```{r}
+prec_obs <- list.files('/Volumes/Data/CHELSA/CHELSA_V2/climatology', full.names = TRUE, pattern = '*CHELSA_pr*') %>%
+             read_stars(along = 'time') %>% 
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('prec')
+tmin_obs<- list.files('/Volumes/Data/CHELSA/CHELSA_V2/climatology', full.names = TRUE, pattern = '*CHELSA_tasmin*') %>%
+             read_stars(along = 'time') %>%
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('tmin') 
+tmax_obs <- list.files('/Volumes/Data/CHELSA/CHELSA_V2/climatology', full.names = TRUE, pattern = '*CHELSA_tasmax*') %>%
+             read_stars(along = 'time') %>%
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('tmax')
+srad_obs <- list.files('/Volumes/Data/CHELSA/srad', full.names = TRUE, pattern = '*CHELSA_srad*') %>%
+  .[c(1,5:12, 2:4)] %>%
+             read_stars(along = 'time') %>%
+             st_warp(ref, use_gdal = TRUE, method = 'average') %>%
+             setNames('srad')
+
+obs <- c(prec_obs,
+           tmin_obs,
+           tmax_obs,
+         srad_obs) %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec / 10, mm/month),
+         tmin = set_units(tmin / 10, K) %>% set_units(degree_C),
+         tmax = set_units(tmax / 10, K) %>% set_units(degree_C),
+         srad = set_units(srad, kJ/m^2))
+
+rm(prec_obs, tmin_obs, tmax_obs, srad_obs)
+```
+
+```{r}
+prec_ccsm2 <- brick('/Volumes/Data/GCM/b40.20th.track1.1deg.005.cam2.h0.PRECT.185001-200512.nc') %>%
+    .[[1465:1872]] %>% # 34 years
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>% 
+  st_as_stars() %>%
+  setNames('prec2')
+
+prec_ccsm <- brick('/Volumes/Data/GCM/pr_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>% # 34 years
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  setNames('prec')
+
+tmin_ccsm <- brick('/Volumes/Data/GCM/tasmin_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>%
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  setNames('tmin')
+
+tmax_ccsm <- brick('/Volumes/Data/GCM/tasmax_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>%
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  setNames('tmax')
+
+srad_ccsm <- brick('/Volumes/Data/GCM/rsds_Amon_CCSM4_historical_r1i2p1_185001-200512.nc') %>%
+    .[[1465:1872]] %>%
+   rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  stackApply(1:12, mean) %>%
+  st_as_stars() %>%
+  setNames('srad')
+
+ccsm_hist <- c(prec_ccsm, tmin_ccsm, tmax_ccsm, srad_ccsm, prec_ccsm2) %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec, mm/s) %>% set_units(mm/month),
+         prec2 = set_units(prec2, m/s) %>% set_units(mm/month),
+        tmin = set_units(tmin, K) %>% set_units(degree_C),
+         tmax = set_units(tmax, K) %>% set_units(degree_C),
+        srad = set_units(srad, W/m^2))
+
+rm(prec_ccsm, prec_ccsm2, tmin_ccsm, tmax_ccsm, srad_ccsm)
+```
+
+
+```{r}
+ggplot() +
+  geom_stars(data = obs['prec'] %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude') +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = obs['tmin'] %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_viridis_c(option = 'magma') +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude') +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = obs['tmax'] %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_viridis_c(option = 'magma') +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude') +
+  coord_quickmap()
+ggplot() +
+  geom_stars(data = obs['srad'] %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_viridis_c(option = 'plasma') +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude') +
+  coord_quickmap()
+```
+
+# EOF
+
+The spectra of each dataset look similar, so a truncation at 4 PCs seems reasonable for all.
+```{r}
+plot_scree(obs['prec'], k = 4, kmax = 12)
+plot_scree(obs['tmin'], k = 4, kmax = 12)
+plot_scree(obs['tmax'], k = 4, kmax = 12)
+plot_scree(obs['srad'], k = 4, kmax = 12)
+```
+
+```{r}
+plot_scree(ccsm_hist['prec'], k = 4, kmax = 12)
+plot_scree(ccsm_hist['tmin'], k = 4, kmax = 12)
+plot_scree(ccsm_hist['tmax'], k = 4, kmax = 12)
+plot_scree(ccsm_hist['srad'], k = 4, kmax = 12)
+```
+
+```{r}
+plot_scree(obs['prec'], k = 4, kmax = 12, scale = TRUE)
+plot_scree(obs['tmin'], k = 4, kmax = 12, scale = TRUE)
+plot_scree(obs['tmax'], k = 4, kmax = 12, scale = TRUE)
+```
+```{r}
+plot_scree(ccsm_hist['prec'], k = 4, kmax = 12, scale = TRUE)
+plot_scree(ccsm_hist['tmin'], k = 4, kmax = 12, scale = TRUE)
+plot_scree(ccsm_hist['tmax'], k = 4, kmax = 12, scale = TRUE)
+```
+
+
+```{r}
+plot_scree(ccsm_mh, k = 4, kmax = 12)
+plot_scree(ccsm_hist, k = 4, kmax = 12)
+```
+With the scaled EOFs you could make the case for 5.
+```{r}
+plot_scree(era_land, k = 4, kmax = 12, scale = TRUE)
+plot_scree(ccsm_mh, k = 4, kmax = 12, scale = TRUE)
+plot_scree(ccsm_hist, k = 4, kmax = 12, scale = TRUE)
+```
+
+
+```{r}
+obs_patterns_prec <- get_patterns(obs['prec'], k = 4, scale = TRUE)
+obs_patterns_tmin <- get_patterns(obs['tmin'], k = 5, scale = TRUE)
+obs_patterns_tmax <- get_patterns(obs['tmax'], k = 5, scale = TRUE)
+```
+
+```{r}
+fit_cv <- function(dat, fun, k, obs) {
+  recon <- pmap(list(dat$train_preds, dat$train_obs, dat$test), fun, k = k) %>%
+    do.call('c', .)
+  sqrt(mean(pull(recon - obs, 1) ^ 2, na.rm = TRUE)) %>% as.numeric()
+}
+
+library(furrr)
+plan(sequential)
+```
+
+```{r}
+expand_grid(kx = 1:6, ky = 1:6, kxy = 1:6) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['srad'], 
+                                                obs = obs['srad', 2:661],
+                                                kfolds = 6, scale = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['srad', 2:661]))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+```{r}
+expand_grid(kx = 1:6, ky = 1:6, kxy = 1:6) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['srad'], 
+                                                obs = obs['srad', 2:661],
+                                                kfolds = 6, scale = FALSE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['srad', 2:661]))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+```{r}
+expand_grid(kx = 1:6, ky = 1:6, kxy = 1:6) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['srad'], 
+                                                obs = obs['srad', 2:661],
+                                                kfolds = 6, scale = FALSE, rotate = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['srad', 2:661]))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+```{r}
+expand_grid(kx = 1:6, ky = 1:6, kxy = 1:6) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['srad'], 
+                                                obs = obs['srad', 2:661],
+                                                kfolds = 6, scale = TRUE, rotate = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['srad', 2:661]))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+```{r}
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = future_pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['prec'])), .progress = TRUE) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+```{r}
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = future_pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = FALSE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['prec'])), .progress = TRUE) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+```{r}
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = FALSE, rotate = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['prec']))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+```{r}
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = TRUE, rotate = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['prec']))) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+```{r}
+expand_grid(kx = 1, ky = 1, kxy = 1) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = future_pmap(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = TRUE, rotate = TRUE))) 
+
+prep_cca( preds = ccsm_hist['prec'], 
+                                                obs = obs['prec'],
+                                                kfolds = 6, scale = TRUE, rotate = TRUE, k_preds = 2, k_obs = 2)
+
+get_patterns(ccsm_hist['prec'], k = 1, rotate = TRUE)
+get_patterns
+
+    pca <- get_pcs(ccsm_hist['prec'], scale = TRUE)
+
+      eofs <- pca$rotation[, 1:2, drop = FALSE] %>% # drop = FALSE preserves PC names when there's only 1 PC
+      `%*%`(diag(pca$sdev,2, 2)) %>% # scale by sdev (sqrt(eigenvalues)) for more robust rotation
+    `colnames<-`(paste0('PC', 1:2))
+      
+      varimax(eofs)
+```
+
+
+```{r}
+
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = future_pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['tmax'], 
+                                                obs = obs['tmax'],
+                                                kfolds = 6, scale = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['tmax'])), .progress = TRUE) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+```{r}
+expand_grid(kx = 1:8, ky = 1:8, kxy = 1:8) %>%
+  filter(kxy <= pmin(kx, ky)) %>%
+  mutate(cv = future_pmap_dbl(list(kx, ky, kxy), ~prep_cca(..1, ..2, 
+                                                preds = ccsm_hist['tmin'], 
+                                                obs = obs['tmin'],
+                                                kfolds = 6, scale = TRUE) %>% 
+                     fit_cv(fun = predict_cca, k = ..3, obs['tmin'])), .progress = TRUE) %>% 
+  group_by(kxy) %>% 
+  filter(cv == min(cv)) %>% 
+  ggplot(aes(kxy, cv)) + 
+  geom_line()
+```
+
+Do you get residual structure? ### this is wrong because it doesn't go nonneg!
+```{r}
+test <- get_patterns(obs['tmax'] -reconstruct_field(get_patterns(obs['tmax'], scale = TRUE, k  = 1)), k = 5, scale = TRUE)
+test7 <- get_patterns(obs['tmax'] -reconstruct_field(get_patterns(obs['tmax'], scale = TRUE, k  = 1), nonneg = FALSE), k = 5, scale = TRUE)
+
+test2 <- get_patterns(obs['tmin'] -reconstruct_field(get_patterns(obs['tmin'], scale = TRUE, k  = 1)), k = 5, scale = TRUE)
+test8 <- get_patterns(obs['tmin'] -reconstruct_field(get_patterns(obs['tmin'], scale = TRUE, k  = 1), nonneg = FALSE), k = 5, scale = TRUE)
+
+test3 <- get_patterns(obs['srad', 2:661] - reconstruct_field(get_patterns(obs['srad',2:661], scale = TRUE, k  = 1)), k = 5, scale = TRUE)
+test9 <- get_patterns(obs['srad', 2:661] - reconstruct_field(get_patterns(obs['srad', 2:661], scale = TRUE, k  = 1), nonneg = FALSE), k = 5, scale = TRUE)
+
+plot_eofs(test)
+plot_eofs(test7)
+
+plot_eofs(test2)
+plot_eofs(test8)
+
+plot_eofs(test3)
+plot_eofs(test9)
+```
+
+
+```{r}
+plot(reconstruct_field(get_patterns(obs['srad',2:661], scale = TRUE, k  = 1)))
+plot(reconstruct_field(get_patterns(obs['srad',2:661], scale = FALSE, k  = 1)))
+
+plot_eofs(get_patterns(obs['srad',2:661], scale = TRUE, k  = 1))
+plot_eofs(get_patterns(obs['srad',2:661], scale = FALSE, k  = 1))
+
+plot(obs['srad', 2:661] - reconstruct_field(get_patterns(obs['srad',2:661], scale = TRUE, k  = 1)))
+```
+
+```{r}
+plot_eofs(obs_patterns_prec)
+plot_eofs(obs_patterns_tmin)
+plot_eofs(obs_patterns_tmax)
+```
+```{r}
+plot_amps(obs_patterns_prec)
+plot_amps(obs_patterns_tmin)
+plot_amps(obs_patterns_tmax)
+```
+
+
+```{r}
+hist_patterns_prec <- get_patterns(ccsm_hist['prec'], k = 4, scale = TRUE)
+hist_patterns_tmin <- get_patterns(ccsm_hist['tmin'], k = 5, scale = TRUE)
+hist_patterns_tmax <- get_patterns(ccsm_hist['tmax'], k = 5, scale = TRUE)
+```
+
+
+```{r}
+plot_eofs(hist_patterns_prec)
+plot_eofs(hist_patterns_tmin)
+plot_eofs(hist_patterns_tmax)
+```
+```{r}
+plot_amps(obs_patterns_prec)
+plot_amps(obs_patterns_tmin)
+plot_amps(obs_patterns_tmax)
+plot_amps(hist_patterns_prec)
+plot_amps(hist_patterns_tmin)
+plot_amps(hist_patterns_tmax)
+```
+
+```{r}
+mh_prec <- brick('/Volumes/Data/PMIP3//MH/pr/pr_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  setNames('prec') 
+
+mh_tmin <- brick('/Volumes/Data/PMIP3/MH/tasmin/tasmin_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'tasmin') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  setNames('tmin') 
+
+mh_tmax <- brick('/Volumes/Data/PMIP3/MH/tasmax/tasmax_Aclim_CCSM4_midHolocene_r1i1p1_100001-130012-clim.nc', var = 'tasmax') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+  setNames('tmax') 
+
+ccsm_mh <- c(mh_prec, mh_tmin, mh_tmax) %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  mutate(prec = set_units(prec, mm/s) %>% set_units(mm/month),
+        tmin = set_units(tmin, K) %>% set_units(degree_C),
+         tmax = set_units(tmax, K) %>% set_units(degree_C))
+```
+
+
+# CV
+So set up a cross validation scheme to compare the scaled/unscaled, rotated/unrotated eofs, and number of EOFs.
+
+# Anomalies
+
+```{r}
+ggplot() +
+  geom_stars(data = (ccsm_mh['prec'] - ccsm_hist['prec']) %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_distiller(palette = 'PuOr', limits = c(-28, 28), direction = 1) +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude', title = 'Monthly mean preciptiation anomaly', subtitle = 'Mid Holocene to Present') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = (ccsm_mh['prec'] - ccsm_hist['prec2']) %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_distiller(palette = 'PuOr', limits = c(-28, 28), direction = 1) +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude', title = 'Monthly mean preciptiation anomaly', subtitle = 'Mid Holocene to Present') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = (ccsm_mh['tmax'] - ccsm_hist['tmax']) %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-4.8, 4.8)) +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude', title = 'Monthly mean maximum temperature anomaly', subtitle = 'Mid Holocene to Present') +
+  coord_quickmap()
+
+ggplot() +
+  geom_stars(data = (ccsm_mh['tmin'] - ccsm_hist['tmin']) %>% st_set_dimensions('time', values = month.name)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-4.1, 4.1)) +
+  facet_wrap(~time) +
+  theme_bw() +
+  labs(x = 'Longitude', y = 'Latitude', title = 'Monthly mean minimum temperature anomaly', subtitle = 'Mid Holocene to Present') +
+  coord_quickmap()
+```
+```{r}
+preind <- brick('~/Downloads/pr_Aclim_CCSM4_piControl_r1i1p1_025001-130012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+   #   st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec')%>%
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+
+mri <- brick('/Volumes/Data/PMIP3/MH/pr/pr_Aclim_MRI-CGCM3_midHolocene_r1i1p1_195101-205012-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+   #   st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec')%>%
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+
+giss <- brick('/Volumes/Data/PMIP3/MH/pr/pr_Aclim_GISS-E2-R_midHolocene_r1i1p1_250001-259912-clim.nc', var = 'pr') %>%
+  raster::rotate() %>%
+  raster::crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+   #   st_warp(ref_sim, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = 1:12, names = 'time') %>%
+  setNames('prec')%>%
+  mutate(prec = units::set_units(prec, mm/s)) %>%
+  mutate(prec = units::set_units(prec, mm/month))
+```
+
+```{r}
+plot_amps(hist_patterns_prec)
+plot_amps(obs_patterns_prec)
+plot_amps(get_patterns(obs['prec'], scale = FALSE, rotate = TRUE))
+plot_amps(get_patterns(ccsm_mh['prec'], scale = FALSE, rotate = TRUE))
+plot_amps(get_patterns(ccsm_hist['prec'], scale = FALSE, rotate = TRUE))
+plot_amps(get_patterns(ccsm_hist['prec2'], scale = FALSE, rotate = TRUE))
+plot_amps(get_patterns(preind, scale = FALSE, rotate = TRUE))
+
+```
+
+```{r}
+
+a <- bind_rows(list(obs = get_patterns(obs['prec'])$amplitudes,
+          prec_hist = get_patterns(ccsm_hist['prec'])$amplitudes,
+          prec2_hist = get_patterns(ccsm_hist['prec2'])$amplitudes,
+          mh = get_patterns(ccsm_mh['prec'])$amplitudes,
+          preind = get_patterns(preind)$amplitudes,
+          mri = get_patterns(mri)$amplitudes,
+          giss = get_patterns(giss)$amplitudes), .id = 'type') %>%
+  ggplot(aes(time, PC1, color = type)) +
+    scale_color_brewer(palette = 'Spectral') +
+  geom_line(size = 1.2, alpha = .8) +
+  ggtitle('original')
+
+
+b <- bind_rows(list(obs = get_patterns(obs['prec'], rotate = TRUE)$amplitudes,
+          prec_hist = get_patterns(ccsm_hist['prec'], rotate = TRUE)$amplitudes,
+          prec2_hist = get_patterns(ccsm_hist['prec2'], rotate = TRUE)$amplitudes,
+          mh = get_patterns(ccsm_mh['prec'], rotate = TRUE)$amplitudes,
+          preind = get_patterns(preind, rotate = TRUE)$amplitudes,
+          mri = get_patterns(mri, rotate = TRUE)$amplitudes,
+          giss = get_patterns(giss, rotate = TRUE)$amplitudes), .id = 'type') %>%
+  ggplot(aes(time, PC1, color = type)) +
+    scale_color_brewer(palette = 'Spectral') +
+  geom_line(size = 1.2, alpha = .8) +
+  ggtitle('rotate')
+
+c <- bind_rows(list(obs = get_patterns(obs['prec'], scale = TRUE, rotate = TRUE)$amplitudes,
+          prec_hist = get_patterns(ccsm_hist['prec'], scale = TRUE, rotate = TRUE)$amplitudes,
+          prec2_hist = get_patterns(ccsm_hist['prec2'], scale = TRUE, rotate = TRUE)$amplitudes,
+          mh = get_patterns(ccsm_mh['prec'], scale = TRUE, rotate = TRUE)$amplitudes,
+          preind = get_patterns(preind, scale = TRUE, rotate = TRUE)$amplitudes,
+          mri = get_patterns(mri, scale = TRUE, rotate = TRUE)$amplitudes,
+          giss = get_patterns(giss, scale = TRUE, rotate = TRUE)$amplitudes), .id = 'type') %>%
+  ggplot(aes(time, PC1, color = type)) +
+    scale_color_brewer(palette = 'Spectral') +
+  geom_line(size = 1.2, alpha = .8) +
+  ggtitle('rotate_scale')
+
+
+d <- bind_rows(list(obs = get_patterns(obs['prec'], scale = TRUE)$amplitudes,
+          prec_hist = get_patterns(ccsm_hist['prec'], scale = TRUE)$amplitudes,
+          prec2_hist = get_patterns(ccsm_hist['prec2'], scale = TRUE)$amplitudes,
+          mh = get_patterns(ccsm_mh['prec'], scale = TRUE)$amplitudes,
+          preind = get_patterns(preind, scale = TRUE)$amplitudes,
+          mri = get_patterns(mri, scale = TRUE)$amplitudes,
+          giss = get_patterns(giss, scale = TRUE)$amplitudes), .id = 'type') %>%
+  ggplot(aes(time, PC1, color = type)) +
+    scale_color_brewer(palette = 'Spectral') +
+  geom_line(size = 1.2, alpha = .8) +
+  ggtitle('scale')
+
+library(patchwork)
+a + b + c +d +plot_layout(guides = 'collect')
+```
+
+
+```{r}
+plot_eofs(get_patterns(obs['prec']))
+plot_eofs(get_patterns(ccsm_hist['prec']))
+
+plot_eofs(get_patterns(obs['prec'], scale = TRUE))
+plot_eofs(get_patterns(ccsm_hist['prec'], scale = TRUE))
+
+plot_eofs(get_patterns(obs['prec'], scale = TRUE, rotate = TRUE))
+plot_eofs(get_patterns(ccsm_hist['prec'], scale = TRUE, rotate = TRUE))
+```
+
+# Downscaling
+
+
+```{r}
+prec_recon <- predict_cca(hist_patterns_prec, obs_patterns_prec, ccsm_mh['prec'], k = 4)
+tmin_recon <- predict_cca(hist_patterns_tmin, obs_patterns_tmin, ccsm_mh['tmin'], k = 4)
+tmax_recon <- predict_cca(hist_patterns_tmax, obs_patterns_tmax, ccsm_mh['tmax'], k = 4)
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = t1) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
+ggplot() +
+  geom_stars(data = t2) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
+```
+
+Ok so as a first look there is a good deal of disagreement between the CCSM anomalies and the downscaled ones.
+
+```{r}
+delta <- function(pred, obs, newdata = NULL, k = NULL) { # k is just a placeholder
+  if(is.null(newdata)) newdata <- pred
+  pred_clim <- get_climatology(pred)
+  obs_clim <- get_climatology(obs)
+
+  (newdata / pred_clim['mean']) %>%
+    st_warp(slice(obs, 'time', 1), use_gdal = TRUE, method = 'bilinear') %>%
+    setNames(names(newdata)) %>%
+    mutate(across(everything(), ~units::set_units(.x, units(newdata[[1]]), mode = 'standard'))) %>%
+    st_set_dimensions('band', values = st_get_dimension_values(newdata, 'time'), names = 'time') %>%
+    `*`(obs_clim['mean'])
+}
+
+delta_add <- function(pred, obs, newdata = NULL, k = NULL) { # k is just a placeholder
+  if(is.null(newdata)) newdata <- pred
+  pred_clim <- get_climatology(pred)
+  obs_clim <- get_climatology(obs)
+
+  # simplify units here!
+  (units::drop_units(newdata) - pred_clim['mean']) %>%
+    st_warp(slice(obs, 'time', 1), use_gdal = TRUE, method = 'bilinear') %>%
+    setNames(names(newdata)) %>%
+    mutate(across(everything(), ~units::set_units(.x, units(newdata[[1]]), mode = 'standard'))) %>%
+    st_set_dimensions('band', values = st_get_dimension_values(newdata, 'time'), names = 'time') %>%
+    units::drop_units() %>%
+    `+`(obs_clim['mean']) %>%
+    mutate(prec = units::set_units(if_else(prec < 0, 0, prec), mm/month))
+}
+
+delta1 <- delta(ccsm_hist, era_land, newdata = ccsm_mh)
+delta2 <- delta_add(ccsm_hist, era_land, newdata = ccsm_mh)
+```
+
+```{r}
+gam <- read_stars('~/Downloads/ccsm4_prc_mh6k.tif') %>%
+  st_warp(era_land, method = 'bilinear', use_gdal = TRUE) %>%
+  st_set_dimensions('band', names = 'time')
+plot(gam)
+
+trace_mh <- list.files('/Volumes/Data/CHELSA/chelsa_trace/pr', pattern = '*_-40_*', full.names = TRUE)[c(1,5:12,2:4)] %>%
+  read_stars(along = 'time') %>%
+  st_warp(era_land, use_gdal = TRUE, method = 'bilinear') %>%
+    st_set_dimensions('band', names = 'time')
+trace_mh2 <- list.files('/Volumes/Data/CHELSA/chelsa_trace/pr', pattern = '*_-45_*', full.names = TRUE)[c(1,5:12,2:4)] %>%
+  read_stars(along = 'time') %>%
+  st_warp(era_land, use_gdal = TRUE, method = 'bilinear') %>%
+    st_set_dimensions('band', names = 'time')
+
+trace_present <- list.files('/Volumes/Data/CHELSA/chelsa_trace/pr', pattern = '*_20_*', full.names = TRUE)[c(1,5:12,2:4)] %>%
+  read_stars(along = 'time') %>%
+  st_warp(era_land, use_gdal = TRUE, method = 'bilinear') %>%
+    st_set_dimensions('band', names = 'time')
+```
+```{r}
+plot(trace_mh - trace_mh2)
+```
+
+
+```{r}
+ggplot() +
+  geom_stars(data = t1 - era_land) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-27, 27), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+ggplot() +
+  geom_stars(data = st_crop(ccsm_mh - ccsm_hist, countries)) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-27, 27), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+ggplot() +
+  geom_stars(data = st_crop(delta1 - era_land, countries)) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-60, 60), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+ggplot() +
+  geom_stars(data = st_crop(delta2 - era_land, countries)) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-60, 60), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+ggplot() +
+  geom_stars(data = st_crop(trace_mh - trace_present, countries)) +
+  facet_wrap(~time) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-60, 60), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+```
+Hmmm, it looks like there could be a date mismatch somewhere here? for example the november and december
+So this *could* be the calendar shift, that in theory is not captured by the delta methods but is captured by the EOF method.
+Very weird, sometimes the sign of the delta method is totally different from the raw anomalies . . .that shouldn't happen right?
+
+Try plotting annual and seasonal anomalies to compare to previous work.
+```{r}
+a <- ggplot() +
+  geom_stars(data = (st_apply(t1, 1:2, sum) - st_apply(era_land, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+b <- ggplot() +
+  geom_stars(data = (st_apply(t2, 1:2, sum) - st_apply(era_land, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+c <- ggplot() +
+  geom_stars(data = (st_apply(ccsm_mh, 1:2, sum) - st_apply(ccsm_hist, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+d <- ggplot() +
+  geom_stars(data = (st_apply(delta1, 1:2, sum) - st_apply(era_land, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+e <- ggplot() +
+  geom_stars(data = (st_apply(delta2, 1:2, sum) - st_apply(era_land, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+f <- ggplot() +
+  geom_stars(data = (st_apply(trace_mh, 1:2, sum) - st_apply(trace_present, 1:2, sum)) / 30) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-5, 5), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+library(patchwork)
+a + b + c + d + e + f + plot_layout(guides = 'collect')
+```
+
+```{r}
+g <- ggplot() +
+  geom_stars(data = (st_apply(t1[,,,c(1,2,12)], 1:2, sum) - st_apply(era_land[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+h <- ggplot() +
+  geom_stars(data = (st_apply(t2[,,,c(1,2,12)], 1:2, sum) - st_apply(era_land[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+i <- ggplot() +
+  geom_stars(data = (st_apply(ccsm_mh[,,,c(1,2,12)], 1:2, sum) - st_apply(ccsm_hist[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+j <- ggplot() +
+  geom_stars(data = (st_apply(delta1[,,,c(1,2,12)], 1:2, sum) - st_apply(era_land[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+k <- ggplot() +
+  geom_stars(data = (st_apply(delta2[,,,c(1,2,12)], 1:2, sum) - st_apply(era_land[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+l <- ggplot() +
+  geom_stars(data = (st_apply(trace_mh[,,,c(1,2,12)], 1:2, sum) - st_apply(trace_present[,,,c(1,2,12)], 1:2, sum))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-100, 100), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+g + h + i + j + k + l + plot_layout(guides = 'collect')
+```
+
+```{r}
+m <- ggplot() +
+  geom_stars(data = (st_apply(t1[,,,6:8], 1:2, mean) - st_apply(era_land[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+n <- ggplot() +
+  geom_stars(data = (st_apply(t2[,,,6:8], 1:2, mean) - st_apply(era_land[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+o <- ggplot() +
+  geom_stars(data = (st_apply(ccsm_mh[,,,6:8], 1:2, mean) - st_apply(ccsm_hist[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+p <- ggplot() +
+  geom_stars(data = (st_apply(delta1[,,,6:8], 1:2, mean) - st_apply(era_land[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+q <- ggplot() +
+  geom_stars(data = (st_apply(delta2[,,,6:8], 1:2, mean) - st_apply(era_land[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+r <- ggplot() +
+  geom_stars(data = (st_apply(trace_mh[,,,6:8], 1:2, mean) - st_apply(trace_present[,,,6:8], 1:2, mean))) +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-50, 50), direction = 1) +
+  geom_sf(data= coast) +
+  theme_void()
+
+m + n + o + p + q + r + plot_layout(guides = 'collect')
+```
+
