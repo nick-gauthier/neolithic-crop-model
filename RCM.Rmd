@@ -1,0 +1,139 @@
+---
+title: "RCM"
+author: "Nick Gauthier"
+date: "8/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(stars)
+library(tidyverse)
+library(tidyEOF) 
+bbox <- extent(c(-10, 45, 30, 50))
+ref <- st_as_stars(st_bbox(bbox, crs = 4326), dx = 0.11)
+coast <- rnaturalearth::ne_coastline(scale = 'medium', returnclass = 'sf') %>% 
+  st_crop(ref)
+```
+
+```{r}
+times <- seq(1970,2005 + (11/12), 1/12)
+```
+
+```{r}
+pred <- read_stars('~/Downloads/pr_Amon_MPI-ESM-LR_historical_r1i1p1_185001-200512.nc') %>%
+  filter(between(time, as.POSIXct(as.yearmon(1970)), as.POSIXct(as.yearmon(2006)))) %>%
+  as('Raster') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  st_as_stars() %>%
+    setNames('pr') %>%
+  mutate(pr = units::set_units(pr, 'mm/s')) %>%
+  st_set_crs(4326) %>%
+st_set_dimensions('band', values = times, names = 'time')
+
+plot(pred[,,,1])
+```
+
+```{r}
+rcm <- read_stars(c('~/Downloads/dataset-projections-cordex-domains-single-levels-f711cb68-1bb3-4778-9aa7-87f119791d69/pr_EUR-11_MPI-M-MPI-ESM-LR_historical_r1i1p1_ICTP-RegCM4-6_v1_mon_197001-198012.nc',
+                 '~/Downloads/dataset-projections-cordex-domains-single-levels-a87bf603-c2e9-4687-9c5d-532121af4e32/pr_EUR-11_MPI-M-MPI-ESM-LR_historical_r1i1p1_ICTP-RegCM4-6_v1_mon_198101-199012.nc',
+                 '~/Downloads/dataset-projections-cordex-domains-single-levels-e03d4dc1-4dc7-448d-a73a-4f7f3652598a/pr_EUR-11_MPI-M-MPI-ESM-LR_historical_r1i1p1_ICTP-RegCM4-6_v1_mon_199101-200012.nc',
+                 '~/Downloads/dataset-projections-cordex-domains-single-levels-917ddc40-199b-48d1-a6d1-43084c238966/pr_EUR-11_MPI-M-MPI-ESM-LR_historical_r1i1p1_ICTP-RegCM4-6_v1_mon_200101-200512.nc')) %>%
+  st_as_stars() %>%
+  st_warp(ref, use_gdal = TRUE, method = 'bilinear') %>%
+  st_set_dimensions('band', values = times, names = 'time') %>%
+  setNames('pr') %>%
+  mutate(pr = units::set_units(pr, 'mm/s'))
+
+rcm_coarse <- st_warp(rcm, pred, use_gdal = TRUE, method = 'average')%>%
+  st_set_dimensions('band', values = times, names = 'time') %>%
+  setNames('pr') %>%
+  mutate(pr = units::set_units(pr, 'mm/s'))
+
+plot(rcm[,,,1])
+plot(rcm_coarse[,,,1])
+plot(pred[,,,1])
+```
+```{r}
+plot_scree(rcm, k = 3, scale = TRUE)
+plot_scree(pred, k = 4, scale = TRUE)
+```
+```{r}
+rcm_pat <- get_patterns(rcm, k = 4, rotate = TRUE, scale = TRUE)
+pred_pat <- get_patterns(pred, k = 4, rotate = TRUE, scale = TRUE)
+coarse_pat <- get_patterns(rcm_coarse, k = 4, rotate = TRUE, scale = TRUE)
+plot_eofs(rcm_pat) +
+  geom_sf(data = coast)
+plot_eofs(pred_pat) +
+  geom_sf(data = coast)
+plot_eofs(coarse_pat) +
+  geom_sf(data = coast)
+```
+```{r}
+regions_rcm <- as(rcm_pat$eofs, 'Raster') %>% abs() %>% which.max() %>%
+  st_as_stars()
+regions_mri <- as(pred_pat$eofs, 'Raster') %>% abs() %>% which.max() %>%
+  st_as_stars()
+regions_coarse <- as(coarse_pat$eofs, 'Raster') %>% abs() %>% which.max() %>%
+  st_as_stars()
+ggplot() +
+  geom_stars(data = regions_rcm) +
+  scale_fill_viridis_c() +
+  geom_sf(data = coast)
+ggplot() +
+  geom_stars(data = regions_mri) +
+  scale_fill_viridis_c() +
+  geom_sf(data = coast)
+ggplot() +
+  geom_stars(data = regions_coarse) +
+  scale_fill_viridis_c() +
+  geom_sf(data = coast)
+```
+
+
+```{r}
+plot_amps(rcm_pat)
+plot_amps(coarse_pat)
+plot_amps(pred_pat)
+```
+
+```{r}
+plot(pred[,,,1:6])
+plot(rcm[,,,1:6])
+```
+```{r}
+rcm_trend <- get_patterns(rcm, k = 4, scale = TRUE)
+pred_trend <- get_patterns(pred, k = 4, scale = TRUE)
+coarse_trend <- get_patterns(rcm_coarse, k = 4, scale = TRUE)
+plot_eofs(rcm_trend)
+plot_eofs(pred_trend)
+plot_eofs(coarse_trend)
+```
+So the correlation between the MRI driving model and the RCM is reasonable but not amazing
+```{r}
+cor(rcm_trend$amplitudes$PC1, pred_trend$amplitudes$PC1)
+cor(rcm_trend$amplitudes$PC2, pred_trend$amplitudes$PC3)
+cor(rcm_trend$amplitudes$PC3, pred_trend$amplitudes$PC2)
+cor(rcm_trend$amplitudes$PC4, pred_trend$amplitudes$PC4)
+```
+
+Compare that to the correlations from just upsacling -- this is the ideal
+```{r}
+cor(rcm_trend$amplitudes$PC1, coarse_trend$amplitudes$PC1)
+cor(rcm_trend$amplitudes$PC2, coarse_trend$amplitudes$PC2)
+cor(rcm_trend$amplitudes$PC3, coarse_trend$amplitudes$PC3)
+cor(rcm_trend$amplitudes$PC4, coarse_trend$amplitudes$PC4)
+```
+
+And these are basically the same -- so the rcm also changes the dynamics when aggregated to monthly scale ... makes sense
+```{r}
+cor(coarse_trend$amplitudes$PC1, pred_trend$amplitudes$PC1)
+cor(coarse_trend$amplitudes$PC2, pred_trend$amplitudes$PC3)
+cor(coarse_trend$amplitudes$PC3, pred_trend$amplitudes$PC2)
+cor(rcm_trend$amplitudes$PC4, pred_trend$amplitudes$PC4)
+```
